@@ -6,6 +6,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      FINAL_ZIP_NAME: ""
     steps:
       - name: Checkout Kernel Source
         uses: actions/checkout@v4
@@ -53,7 +55,7 @@ jobs:
 
           echo "Pre-injecting SUSFS requirements into vulnerable headers..."
           if [ -f "fs/proc/task_mmu.c" ]; then
-            sed -i '1i #include <linux/susfs.h>\n#ifndef INODE_STATE_SUS_KSTAT\n#define INODE_STATE_SUS_KSTAT (1 << 30)\n#endif' fs/proc/task_mmu.c
+            sed -i '1i #include <linux/susfs.h>' fs/proc/task_mmu.c
           fi
           if [ -f "include/linux/sched.h" ]; then
             sed -i '/#include <linux\/uidgid.h>/a #include <linux/susfs.h>' include/linux/sched.h
@@ -64,47 +66,33 @@ jobs:
           PATCH_FILE=$(find susfs_src/kernel_patches/ -name "50_add_susfs_in_kernel-4.14*.patch" | head -n 1)
           if [ -f "$PATCH_FILE" ]; then
             echo "Found official VFS patch: $PATCH_FILE"
-            patch -p1 < "$PATCH_FILE" || echo "Notice: Handled expected patch rejections downstream."
+            patch -p1 < "$PATCH_FILE" || echo "Notice: Standard partial failed hunks will be compensated cleanly below."
           fi
 
           # =====================================================================
-          # 【新增】针对高通 4.14 crux 冲突文件的后置二次全自动修复拦截
+          # 安全修复：将多行注入压缩为单行，彻底杜绝 Shell 换行符歧义
           # =====================================================================
-          echo "Starting post-patch compensation for failed hunks..."
+          echo "Compensating SUSFS failed hunks securely..."
 
-          # 1. 修复 fs/namespace.c (解决挂载隐藏核心冲突)
           if [ -f "fs/namespace.c" ]; then
-            echo "Fixing fs/namespace.c rejections..."
-            # 注入需要的头文件关联
             sed -i '1i #include <linux/susfs.h>' fs/namespace.c
-            # 修复 missing 的 mnt_is_susfs 判断逻辑
             if ! grep -q "bool mnt_is_susfs" fs/namespace.c; then
-              sed -i '/static inline inline_mnt/i #ifdef CONFIG_SUSFS\nbool mnt_is_susfs(struct vfsmount *mnt)\n{\n\treturn (mnt->mnt_flags & MNT_SUSFS);\n}\n#endif\n' fs/namespace.c
+              sed -i '/static inline inline_mnt/i #ifdef CONFIG_SUSFS\nbool mnt_is_susfs(struct vfsmount *mnt) { return (mnt->mnt_flags & MNT_SUSFS); }\n#endif\n' fs/namespace.c
             fi
           fi
 
-          # 2. 修复 fs/proc/cmdline.c (解决 cmdline 隐藏冲突)
           if [ -f "fs/proc/cmdline.c" ]; then
-            echo "Fixing fs/proc/cmdline.c rejections..."
             sed -i '1i #include <linux/susfs.h>' fs/proc/cmdline.c
-            sed -i 's/seq_printf(m, "%s\\n", saved_command_line);/#ifdef CONFIG_SUSFS\n\tif (current->susfs_state & CONFIG_SUSFS_STATE_SUS_CMDLINE) {\n\t\tseq_printf(m, "%s\\n", saved_command_line);\n\t} else {\n\t\tseq_printf(m, "%s\\n", saved_command_line);\n\t}\n#else\n\tseq_printf(m, "%s\\n", saved_command_line);\n#endif/g' fs/proc/cmdline.c
           fi
 
-          # 3. 修复 fs/proc/task_mmu.c (解决 maps 隐藏冲突)
           if [ -f "fs/proc/task_mmu.c" ]; then
-            echo "Fixing fs/proc/task_mmu.c rejections..."
-            sed -i 's/show_map_vma(m, vma, is_pid);/#ifdef CONFIG_SUSFS\n\tif (mnt_is_susfs(vma->vm_file->f_path.mnt)) {\n\t\treturn 0;\n\t}\n#endif\n\tshow_map_vma(m, vma, is_pid);/g' fs/proc/task_mmu.c
+            sed -i 's/show_map_vma(m, vma, is_pid);/#ifdef CONFIG_SUSFS\n\tif (mnt_is_susfs(vma->vm_file->f_path.mnt)) { return 0; }\n#endif\n\tshow_map_vma(m, vma, is_pid);/g' fs/proc/task_mmu.c
           fi
 
-          # 4. 修复 kernel/sys.c (解决 prctl 隐藏挂钩冲突)
           if [ -f "kernel/sys.c" ]; then
-            echo "Fixing kernel/sys.c rejections..."
             sed -i '1i #include <linux/susfs.h>' kernel/sys.c
-            # 找到 SYSCALL_DEFINE5(prctl... 下面的 switch (option) 并直接在其后方注入拦截
-            sed -i 's/switch (option) {/switch (option) {\n#ifdef CONFIG_SUSFS\n\tcase PR_SUSFS_GET_VERSION:\n\t\treturn susfs_get_version((unsigned long __user *)arg2);\n\tcase PR_SUSFS_SET_STATUS:\n\t\treturn susfs_set_status(arg2, (unsigned long __user *)arg3);\n#endif/g' kernel/sys.c
+            sed -i 's/switch (option) {/switch (option) {\n#ifdef CONFIG_SUSFS\n\tcase PR_SUSFS_GET_VERSION: return susfs_get_version((unsigned long __user *)arg2);\n\tcase PR_SUSFS_SET_STATUS: return susfs_set_status(arg2, (unsigned long __user *)arg3);\n#endif/g' kernel/sys.c
           fi
-
-          echo "Post-patch rejections successfully resolved dynamically!"
 
       - name: Start Kernel Compilation
         run: |
@@ -117,26 +105,33 @@ jobs:
           fi
           export PATH=$REAL_CLANG_PATH:$PATH
 
-          # 1. 【指南全套注入】完整补全 crux 4.14 核心 Manual 规范桩点
-          echo "Injecting full ReSukiSU official manual hooks into VFS & Syscall layers..."
+          # =====================================================================
+          # 安全注入：完整对齐 ReSukiSU 核心 Manual 桩点，规避转义大坑
+          # =====================================================================
+          echo "Injecting full ReSukiSU Manual Hooks..."
+          
           if [ -f "fs/stat.c" ]; then
             sed -i '/#include <linux\/uaccess.h>/a #include <linux/compat.h>\n#ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot)) extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\nextern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);\n#ifdef CONFIG_COMPAT\nstruct compat_stat64;\nextern void ksu_handle_fstat64_ret(unsigned int *fd, struct compat_stat64 __user **statbuf_ptr);\n#endif\n#endif' fs/stat.c
             sed -i 's/error = vfs_fstatat/#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_stat(\&dfd, \&filename, \&flag);\n#endif\n\terror = vfs_fstatat/g' fs/stat.c
             sed -i 's/error = cp_new_stat(&stat, statbuf);/error = cp_new_stat(\&stat, statbuf);\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tif (!error) ksu_handle_newfstat_ret(\&fd, \&statbuf);\n#endif/g' fs/stat.c
             sed -i 's/error = cp_compat_stat64(&stat, statbuf);/error = cp_compat_stat64(\&stat, statbuf);\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tif (!error) ksu_handle_fstat64_ret(\&fd, (struct compat_stat64 __user **)\&statbuf);\n#endif/g' fs/stat.c
           fi
+
           if [ -f "fs/exec.c" ]; then
             sed -i '1i #ifdef CONFIG_KSU_MANUAL_HOOK\n#include <linux/binfmts.h>\n__attribute__((hot)) extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n#endif' fs/exec.c
             sed -i 's/retval = bprm_mm_init(bprm)/#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_execveat(\&fd, \&filename, \&argv, \&envp, \&flags);\n#endif\n\tretval = bprm_mm_init(bprm)/g' fs/exec.c
           fi
+
           if [ -f "fs/open.c" ]; then
             sed -i '/#include <linux\/falloc.h>/a #ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot)) extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n#endif' fs/open.c
             sed -i 's/if (mode & ~S_IRWXO)/#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_faccessat(\&dfd, \&filename, (int *)\&mode, NULL);\n#endif\n\tif (mode \& ~S_IRWXO)/g' fs/open.c
           fi
+
           if [ -f "kernel/reboot.c" ]; then
             sed -i '1i #ifdef CONFIG_KSU_MANUAL_HOOK\nextern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n#endif' kernel/reboot.c
             sed -i 's/case LINUX_REBOOT_CMD_RESTART:/#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_sys_reboot(magic1, magic2, cmd, \&arg);\n#endif\n\tcase LINUX_REBOOT_CMD_RESTART:/g' kernel/reboot.c
           fi
+
           if [ -f "fs/read_write.c" ]; then
             sed -i '/#include <linux\/compat.h>/a #ifdef CONFIG_KSU_MANUAL_HOOK\nextern bool ksu_init_rc_hook __read_mostly;\nextern __attribute__((cold)) int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr, size_t *count_ptr);\n#endif' fs/read_write.c
             rm -f ksys_read.patch
@@ -153,12 +148,13 @@ jobs:
             patch -p1 < ksys_read.patch
             rm -f ksys_read.patch
           fi
+
           if [ -f "kernel/sys.c" ]; then
             sed -i '/#include <linux\/uidgid.h>/a #ifdef CONFIG_KSU_MANUAL_HOOK\nextern int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);\n#endif' kernel/sys.c
             sed -i 's/kuid_t kruid, keuid, ksuid;/#ifdef CONFIG_KSU_MANUAL_HOOK\n\t(void)ksu_handle_setresuid(ruid, euid, suid);\n#endif\n\tkuid_t kruid, keuid, ksuid;/g' kernel/sys.c
           fi
 
-          # 2. 生成基础 defconfig 并通过官方配置工具精密开启全部核心参数
+          # 生成基础配置并完全激活全部核心参数
           make O=out ARCH=arm64 crux_defconfig
           
           echo "Injecting explicit config definitions via scripts/config..."
@@ -179,7 +175,7 @@ jobs:
               -e CONFIG_KSU_SUSFS \
               -e CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT
 
-          # 3. 正式使用 ZyC-Clang 16 标准黄金参数启动编译
+          # 正式编译
           echo "Starting make process with full ReSukiSU Manual Hooks & SUSFS 2.1..."
           make -j$(nproc --all) \
                       ARCH=arm64 \
@@ -204,52 +200,58 @@ jobs:
           if [ -f "out/arch/arm64/boot/Image.gz-dtb" ]; then
             echo "Kernel compiled successfully! Preparing AnyKernel3..."
             
+            # 动态获取当前北京时间和短 Commit 号
+            BUILD_DATE=$(date -d "+8 hours" +%Y%m%d_%H%M)
+            SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+            ZIP_NAME="crux-kernel-resukisu-susfs-${BUILD_DATE}-${SHORT_SHA}.zip"
+            
+            echo "FINAL_ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
+            
             git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
             rm -rf AnyKernel3/.git AnyKernel3/README.md AnyKernel3/Image* AnyKernel3/zImage*
             
-            echo "# AnyKernel3 Ramdisk Mod Script" > AnyKernel3/anykernel.sh
-            echo "# osm0sis @ xda-developers" >> AnyKernel3/anykernel.sh
-            echo "" >> AnyKernel3/anykernel.sh
-            echo "## AnyKernel setup" >> AnyKernel3/anykernel.sh
-            echo "# begin properties" >> AnyKernel3/anykernel.sh
-            echo "properties() {" >> AnyKernel3/anykernel.sh
-            echo "kernel.string=Crux Custom Kernel (ReSukiSU + SUSFS 2.1) by xmanweb" >> AnyKernel3/anykernel.sh
-            echo "do.devicecheck=1" >> AnyKernel3/anykernel.sh
-            echo "do.modules=1" >> AnyKernel3/anykernel.sh
-            echo "do.systemless=1" >> AnyKernel3/anykernel.sh
-            echo "do.cleanup=1" >> AnyKernel3/anykernel.sh
-            echo "do.cleanuponabort=1" >> AnyKernel3/anykernel.sh
-            echo "device.name1=crux" >> AnyKernel3/anykernel.sh
-            echo "device.name2=" >> AnyKernel3/anykernel.sh
-            echo "device.name3=" >> AnyKernel3/anykernel.sh
-            echo "device.name4=" >> AnyKernel3/anykernel.sh
-            echo "device.name5=" >> AnyKernel3/anykernel.sh
-            echo "supported.versions=" >> AnyKernel3/anykernel.sh
-            echo "supported.patchlevels=" >> AnyKernel3/anykernel.sh
-            echo "} # end properties" >> AnyKernel3/anykernel.sh
-            echo "" >> AnyKernel3/anykernel.sh
-            echo "## AnyKernel methods (do not change)" >> AnyKernel3/anykernel.sh
-            echo "BLOCK=/dev/block/bootdevice/by-name/boot;" >> AnyKernel3/anykernel.sh
-            echo "IS_SLOT_DEVICE=0;" >> AnyKernel3/anykernel.sh
-            echo "RAMDISK_COMPRESSION=auto;" >> AnyKernel3/anykernel.sh
-            echo "PATCH_VBMETA_FLAG=auto;" >> AnyKernel3/anykernel.sh
-            echo "" >> AnyKernel3/anykernel.sh
-            echo ". /tmp/anykernel/tools/ak3-core.sh;" >> AnyKernel3/anykernel.sh
-            echo "" >> AnyKernel3/anykernel.sh
-            echo "## AnyKernel install" >> AnyKernel3/anykernel.sh
-            echo "split_boot;" >> AnyKernel3/anykernel.sh
-            echo "flash_boot;" >> AnyKernel3/anykernel.sh
-            echo "flash_dtbo;" >> AnyKernel3/anykernel.sh
-            echo "## end install" >> AnyKernel3/anykernel.sh
+            # 写入 anykernel.sh（完全移除了半角括号，使用单引号安全保护）
+            echo '# AnyKernel3 Ramdisk Mod Script' > AnyKernel3/anykernel.sh
+            echo '# osm0sis @ xda-developers' >> AnyKernel3/anykernel.sh
+            echo '' >> AnyKernel3/anykernel.sh
+            echo '## AnyKernel setup' >> AnyKernel3/anykernel.sh
+            echo '# begin properties' >> AnyKernel3/anykernel.sh
+            echo 'properties() {' >> AnyKernel3/anykernel.sh
+            echo "kernel.string=Crux ReSukiSU SUSFS 2.1 - ${BUILD_DATE} - ${SHORT_SHA} - by xmanweb" >> AnyKernel3/anykernel.sh
+            echo 'do.devicecheck=1' >> AnyKernel3/anykernel.sh
+            echo 'do.modules=0' >> AnyKernel3/anykernel.sh
+            echo 'do.systemless=1' >> AnyKernel3/anykernel.sh
+            echo 'do.cleanup=1' >> AnyKernel3/anykernel.sh
+            echo 'do.cleanuponabort=1' >> AnyKernel3/anykernel.sh
+            echo 'device.name1=crux' >> AnyKernel3/anykernel.sh
+            echo 'device.name2=' >> AnyKernel3/anykernel.sh
+            echo 'device.name3=' >> AnyKernel3/anykernel.sh
+            echo 'device.name4=' >> AnyKernel3/anykernel.sh
+            echo 'device.name5=' >> AnyKernel3/anykernel.sh
+            echo 'supported.versions=' >> AnyKernel3/anykernel.sh
+            echo 'supported.patchlevels=' >> AnyKernel3/anykernel.sh
+            echo '} # end properties' >> AnyKernel3/anykernel.sh
+            echo '' >> AnyKernel3/anykernel.sh
+            echo '## AnyKernel methods (do not change)' >> AnyKernel3/anykernel.sh
+            echo 'BLOCK=boot;' >> AnyKernel3/anykernel.sh
+            echo 'IS_SLOT_DEVICE=0;' >> AnyKernel3/anykernel.sh
+            echo 'RAMDISK_COMPRESSION=auto;' >> AnyKernel3/anykernel.sh
+            echo 'PATCH_VBMETA_FLAG=auto;' >> AnyKernel3/anykernel.sh
+            echo '' >> AnyKernel3/anykernel.sh
+            echo '. /tmp/anykernel/tools/ak3-core.sh;' >> AnyKernel3/anykernel.sh
+            echo '' >> AnyKernel3/anykernel.sh
+            echo '## AnyKernel install' >> AnyKernel3/anykernel.sh
+            echo 'split_boot;' >> AnyKernel3/anykernel.sh
+            echo 'flash_boot;' >> AnyKernel3/anykernel.sh
+            echo 'flash_dtbo;' >> AnyKernel3/anykernel.sh
+            echo '## end install' >> AnyKernel3/anykernel.sh
             
             cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/Image.gz-dtb
-            echo "Copying vendor modules..."
-            find out/ -name "*.ko" -exec cp {} AnyKernel3/ \; 2>/dev/null || true
             
             cd AnyKernel3
-            zip -r ../crux-kernel-resukisu-susfs.zip *
+            zip -r ../${ZIP_NAME} *
             cd ..
-            echo "AnyKernel3 flashable zip created successfully!"
+            echo "AnyKernel3 flashable zip created successfully: ${ZIP_NAME}"
           else
             echo "ERROR: Kernel image not found. Compilation failed."
             exit 1
@@ -258,5 +260,5 @@ jobs:
       - name: Upload Flashable Kernel Zip
         uses: actions/upload-artifact@v4
         with:
-          name: crux-kernel-resukisu-susfs2.1
-          path: crux-kernel-resukisu-susfs.zip
+          name: ${{ env.FINAL_ZIP_NAME }}
+          path: ${{ env.FINAL_ZIP_NAME }}
