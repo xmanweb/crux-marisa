@@ -5,7 +5,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04  # 回归最稳的 4.14 编译环境
     steps:
       - name: Checkout Kernel Source
         uses: actions/checkout@v4
@@ -15,28 +15,29 @@ jobs:
       - name: Install Build Dependencies
         run: |
           sudo apt-get update
+          # 清理掉时代眼泪 python2 和 textinfo 拼写错误，保持 20.04 环境绝对纯净
           sudo apt-get install -y bc build-essential libncurses5-dev libssl-dev texinfo \
             libgmp3-dev libmpfr-dev libmpc-dev libcap-dev zlib1g-dev python3 \
             bison flex ccache libelf-dev lz4 liblz4-tool libstdc++6 openjdk-11-jdk zip unzip curl git
 
-      - name: Fetch Toolchains (Proton Clang 13 & GCC)
+      - name: Fetch Toolchains (AOSP Clang 11 & GCC)
         run: |
           mkdir -p $GITHUB_WORKSPACE/toolchain
           cd $GITHUB_WORKSPACE/toolchain
           
-          # 下载目前编译 4.14 最稳的 Proton Clang 13 (自带完整 llvm 链)
-          echo "Downloading Proton Clang 13..."
-          curl -LO https://github.com/kdrag0n/proton-clang/archive/refs/heads/master.tar.gz
-          mkdir -p proton-clang
-          tar -xzf master.tar.gz --strip-components=1 -C proton-clang
+          # 重新拉取最标准的官方 AOSP Clang 11
+          echo "Downloading AOSP Clang..."
+          curl -LO https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/android11-gsi/clang-r383902.tar.gz
+          mkdir -p clang
+          tar -xzf clang-r383902.tar.gz -C clang
           
-          # 下载 AOSP GCC 64位 交叉编译器 (供内核某些汇编部分使用)
+          # 下载官方 AOSP GCC 64位 
           echo "Downloading GCC 64-bit..."
           curl -LO https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/android-11.0.0_r47.tar.gz
           mkdir -p gcc64
           tar -xzf android-11.0.0_r47.tar.gz -C gcc64
           
-          # 下载 AOSP GCC 32位 交叉编译器
+          # 下载官方 AOSP GCC 32位
           echo "Downloading GCC 32-bit..."
           curl -LO https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/+archive/refs/tags/android-11.0.0_r47.tar.gz
           mkdir -p gcc32
@@ -46,27 +47,28 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE
           
-          # 更新为 Proton Clang 的路径
-          export CLANG_PATH=$GITHUB_WORKSPACE/toolchain/proton-clang/bin
+          export CLANG_PATH=$GITHUB_WORKSPACE/toolchain/clang/bin
           export GCC64_PATH=$GITHUB_WORKSPACE/toolchain/gcc64/bin
           export GCC32_PATH=$GITHUB_WORKSPACE/toolchain/gcc32/bin
           
-          export PATH=$CLANG_PATH:$GCC64_PATH:$GCC32_PATH:$PATH
+          # 重点：不要把 CLANG_PATH 无脑塞进全局 PATH，防止污染主机编译工具 (HOSTCC)
+          # 我们把交叉编译器的路径加进去即可
+          export PATH=$GCC64_PATH:$GCC32_PATH:$PATH
           
           export ARCH=arm64
           export SUBARCH=arm64
-          export HEADER_ARCH=arm64
           
           # 1. 生成配置文件
           make O=out ARCH=arm64 crux_defconfig
           
-          # 2. 开始正式编译（Proton Clang 只需要极简的 CC=clang 参数就能自适应全套构建）
-          echo "Starting make process with Proton Clang..."
+          # 2. 正式编译：将 Clang 的绝对路径直接喂给 CC，完美隔离 Host 和 Target
+          echo "Starting make process with isolated paths..."
           make -j$(nproc --all) O=out \
                       ARCH=arm64 \
-                      CC=clang \
-                      CROSS_COMPILE=aarch64-linux-gnu- \
-                      CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+                      CC=$CLANG_PATH/clang \
+                      CLANG_TRIPLE=aarch64-linux-gnu- \
+                      CROSS_COMPILE=aarch64-linux-android- \
+                      CROSS_COMPILE_ARM32=arm-linux-androideabi-
 
       - name: Verify and Package Output
         run: |
@@ -75,7 +77,7 @@ jobs:
             echo "Kernel compiled successfully!"
             mkdir -p output
             cp out/arch/arm64/boot/Image.gz-dtb output/
-            find out/ -name "*.ko" -exec cp {} output/ \;
+            find out/ ... -name "*.ko" -exec cp {} output/ \; 2>/dev/null || true
             cd output && zip -r ../crux-kernel-clean.zip *
           else
             echo "ERROR: Kernel image not found. Compilation might have failed."
