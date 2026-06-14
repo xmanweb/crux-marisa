@@ -47,11 +47,11 @@ jobs:
           cd $GITHUB_WORKSPACE
           
           # 设置环境变量与编译器路径
-          export IMAGE=$GITHUB_WORKSPACE/arch/arm64/boot/Image.gz-dtb
           export CLANG_PATH=$GITHUB_WORKSPACE/toolchain/clang/bin
           export GCC64_PATH=$GITHUB_WORKSPACE/toolchain/gcc64/bin
           export GCC32_PATH=$GITHUB_WORKSPACE/toolchain/gcc32/bin
           
+          # 确保优先使用我们下载的工具链
           export PATH=$CLANG_PATH:$GCC64_PATH:$GCC32_PATH:$PATH
           
           # 核心编译参数定义
@@ -59,15 +59,24 @@ jobs:
           export SUBARCH=arm64
           export HEADER_ARCH=arm64
           
+          # 1. 生成配置文件
           make O=out ARCH=arm64 crux_defconfig
           
+          # 2. 开始正式编译（显式补全 LLVM 链）
           echo "Starting make process..."
           make -j$(nproc --all) O=out \
                       ARCH=arm64 \
                       CC=clang \
+                      LD=ld.lld \
+                      AR=llvm-ar \
+                      NM=llvm-nm \
+                      OBJCOPY=llvm-objcopy \
+                      OBJDUMP=llvm-objdump \
+                      STRIP=llvm-strip \
                       CLANG_TRIPLE=aarch64-linux-gnu- \
                       CROSS_COMPILE=aarch64-linux-android- \
                       CROSS_COMPILE_ARM32=arm-linux-androideabi-
+                      
 
       - name: Verify and Package Output
         run: |
