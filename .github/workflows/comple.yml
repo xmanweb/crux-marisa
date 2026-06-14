@@ -59,7 +59,7 @@ jobs:
           export SUBARCH=arm64
           export HEADER_ARCH=arm64
           
-          make O=out ARCH=arm64 vendor/crux_defconfig
+          make O=out ARCH=arm64 crux_defconfig
           
           echo "Starting make process..."
           make -j$(nproc --all) O=out \
