@@ -1,0 +1,91 @@
+name: Compile Crux Kernel
+
+on:
+  workflow_dispatch: # 允许你在 GitHub 网页端手动点击按钮触发编译
+
+jobs:
+  build:
+    runs-on: ubuntu-20.04
+    steps:
+      - name: Checkout Kernel Source
+        uses: actions/checkout@v4
+        with:
+          ref: test # 强制指定检出你刚刚清理干净的 test 分支
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc build-essential libncurses5-dev libssl-dev textinfo libtinfo5 \
+            classads libgmp3-dev libmpfr-dev libmpc-dev libcap-dev zlib1g-dev python2 python3 \
+            bison flex ccache libelf-dev lz4 liblz4-tool libstdc++6 openjdk-11-jdk zip unzip curl git
+
+      - name: Fetch Toolchains (Clang & GCC)
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/toolchain
+          cd $GITHUB_WORKSPACE/toolchain
+          
+          # 下载 AOSP 官方 Clang 11.0.5 (适合 4.14 内核)
+          echo "Downloading AOSP Clang..."
+          curl -LO https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/android11-gsi/clang-r383902.tar.gz
+          mkdir -p clang
+          tar -xzf clang-r383902.tar.gz -C clang
+          
+          # 下载 AOSP GCC 64位 交叉编译器
+          echo "Downloading GCC 64-bit..."
+          curl -LO https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/android-11.0.0_r47.tar.gz
+          mkdir -p gcc64
+          tar -xzf android-11.0.0_r47.tar.gz -C gcc64
+          
+          # 下载 AOSP GCC 32位 交叉编译器
+          echo "Downloading GCC 32-bit..."
+          curl -LO https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/+archive/refs/tags/android-11.0.0_r47.tar.gz
+          mkdir -p gcc32
+          tar -xzf android-11.0.0_r47.tar.gz -C gcc32
+
+      - name: Start Kernel Compilation
+        run: |
+          cd $GITHUB_WORKSPACE
+          
+          # 设置环境变量与编译器路径
+          export IMAGE=$GITHUB_WORKSPACE/arch/arm64/boot/Image.gz-dtb
+          export CLANG_PATH=$GITHUB_WORKSPACE/toolchain/clang/bin
+          export GCC64_PATH=$GITHUB_WORKSPACE/toolchain/gcc64/bin
+          export GCC32_PATH=$GITHUB_WORKSPACE/toolchain/gcc32/bin
+          
+          export PATH=$CLANG_PATH:$GCC64_PATH:$GCC32_PATH:$PATH
+          
+          # 核心编译参数定义
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export HEADER_ARCH=arm64
+          
+          make O=out ARCH=arm64 vendor/crux_defconfig
+          
+          echo "Starting make process..."
+          make -j$(nproc --all) O=out \
+                      ARCH=arm64 \
+                      CC=clang \
+                      CLANG_TRIPLE=aarch64-linux-gnu- \
+                      CROSS_COMPILE=aarch64-linux-android- \
+                      CROSS_COMPILE_ARM32=arm-linux-androideabi-
+
+      - name: Verify and Package Output
+        run: |
+          cd $GITHUB_WORKSPACE
+          if [ -f "out/arch/arm64/boot/Image.gz-dtb" ]; then
+            echo "Kernel compiled successfully!"
+            mkdir -p output
+            cp out/arch/arm64/boot/Image.gz-dtb output/
+            # 顺便把编译出来的内核模块也打包，以防某些硬件需要
+            find out/ -name "*.ko" -exec cp {} output/ \;
+            cd output && zip -r ../crux-kernel-clean.zip *
+          else
+            echo "ERROR: Kernel image not found. Compilation might have failed."
+            exit 1
+          fi
+
+      - name: Upload Kernel Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: crux-kernel-clean
+          path: crux-kernel-clean.zip
