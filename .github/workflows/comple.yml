@@ -74,26 +74,52 @@ jobs:
             
             # 1. 克隆官方 AnyKernel3 模板
             git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
-            
-            # 2. 移除模板中自带的无用占位文件
             rm -rf AnyKernel3/.git AnyKernel3/README.md AnyKernel3/Image* AnyKernel3/zImage*
             
-            # 3. 核心配置修改：配置 crux (小米9 Pro) 的设备参数
-            # block 指向的是 crux 的 boot 分区路径 (/dev/block/bootdevice/by-name/boot)
-            sed -i 's/kernel.string=./kernel.string=Crux Custom Kernel by xmanweb/g' AnyKernel3/anykernel.sh
-            sed -i 's/device.name1=./device.name1=crux/g' AnyKernel3/anykernel.sh
-            sed -i 's/device.name2=./device.name2=crux_pro/g' AnyKernel3/anykernel.sh
-            sed -i 's|block=/dev/block/platform/omap/omap_hsmmc.0/by-name/boot;|block=/dev/block/bootdevice/by-name/boot;|g' AnyKernel3/anykernel.sh
-            sed -i 's/is_slot_device=0;/is_slot_device=0;/g' AnyKernel3/anykernel.sh # crux 是非 A/B 分区设备
+            # 2. 【终极修复】每一行都保持完整的 YAML 缩进，用 printf/echo 完美避开 YAML 解析器的顶格敏感限制
+            echo "# AnyKernel3 Ramdisk Mod Script" > AnyKernel3/anykernel.sh
+            echo "# osm0sis @ xda-developers" >> AnyKernel3/anykernel.sh
+            echo "" >> AnyKernel3/anykernel.sh
+            echo "## AnyKernel setup" >> AnyKernel3/anykernel.sh
+            echo "# begin properties" >> AnyKernel3/anykernel.sh
+            echo "properties() {" >> AnyKernel3/anykernel.sh
+            echo "kernel.string=Crux Custom Kernel by xmanweb" >> AnyKernel3/anykernel.sh
+            echo "do.devicecheck=1" >> AnyKernel3/anykernel.sh
+            echo "do.modules=1" >> AnyKernel3/anykernel.sh
+            echo "do.systemless=1" >> AnyKernel3/anykernel.sh
+            echo "do.cleanup=1" >> AnyKernel3/anykernel.sh
+            echo "do.cleanuponabort=1" >> AnyKernel3/anykernel.sh
+            echo "device.name1=crux" >> AnyKernel3/anykernel.sh
+            echo "device.name2=" >> AnyKernel3/anykernel.sh
+            echo "device.name3=" >> AnyKernel3/anykernel.sh
+            echo "device.name4=" >> AnyKernel3/anykernel.sh
+            echo "device.name5=" >> AnyKernel3/anykernel.sh
+            echo "supported.versions=" >> AnyKernel3/anykernel.sh
+            echo "supported.patchlevels=" >> AnyKernel3/anykernel.sh
+            echo "} # end properties" >> AnyKernel3/anykernel.sh
+            echo "" >> AnyKernel3/anykernel.sh
+            echo "## AnyKernel methods (do not change)" >> AnyKernel3/anykernel.sh
+            echo "BLOCK=/dev/block/bootdevice/by-name/boot;" >> AnyKernel3/anykernel.sh
+            echo "IS_SLOT_DEVICE=0;" >> AnyKernel3/anykernel.sh
+            echo "RAMDISK_COMPRESSION=auto;" >> AnyKernel3/anykernel.sh
+            echo "PATCH_VBMETA_FLAG=auto;" >> AnyKernel3/anykernel.sh
+            echo "" >> AnyKernel3/anykernel.sh
+            echo ". /tmp/anykernel/tools/ak3-core.sh;" >> AnyKernel3/anykernel.sh
+            echo "" >> AnyKernel3/anykernel.sh
+            echo "## AnyKernel install" >> AnyKernel3/anykernel.sh
+            echo "split_boot;" >> AnyKernel3/anykernel.sh
+            echo "flash_boot;" >> AnyKernel3/anykernel.sh
+            echo "flash_dtbo;" >> AnyKernel3/anykernel.sh
+            echo "## end install" >> AnyKernel3/anykernel.sh
             
-            # 4. 把刚刚编译出来的 Image.gz-dtb 复制进 AnyKernel3 根目录
+            # 3. 把刚刚编译出来的 Image.gz-dtb 复制进 AnyKernel3 根目录
             cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/Image.gz-dtb
             
-            # 5. 自动收集并打包编译出来的内核模块 (*.ko)
+            # 4. 自动收集并打包编译出来的内核模块 (*.ko)
             echo "Copying vendor modules..."
             find out/ -name "*.ko" -exec cp {} AnyKernel3/ \; 2>/dev/null || true
             
-            # 6. 生成最终的第三方 Recovery 刷机包
+            # 5. 生成最终的第三方 Recovery 刷机包
             cd AnyKernel3
             zip -r ../crux-kernel-anykernel3.zip *
             cd ..
