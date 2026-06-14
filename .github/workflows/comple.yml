@@ -46,12 +46,21 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE
           
-          # 设置环境变量与编译器路径
+          # 设置工具链基础路径
           export CLANG_PATH=$GITHUB_WORKSPACE/toolchain/clang/bin
           export GCC64_PATH=$GITHUB_WORKSPACE/toolchain/gcc64/bin
           export GCC32_PATH=$GITHUB_WORKSPACE/toolchain/gcc32/bin
           
-          # 确保优先使用我们下载的工具链
+          # 【核心黑魔法】建立软链接，强行欺骗内核的编译检查
+          echo "Setting up LLVM wrappers..."
+          ln -sf $CLANG_PATH/ld.lld $CLANG_PATH/ld
+          ln -sf $CLANG_PATH/llvm-ar $CLANG_PATH/ar
+          ln -sf $CLANG_PATH/llvm-nm $CLANG_PATH/nm
+          ln -sf $CLANG_PATH/llvm-objcopy $CLANG_PATH/objcopy
+          ln -sf $CLANG_PATH/llvm-objdump $CLANG_PATH/objdump
+          ln -sf $CLANG_PATH/llvm-strip $CLANG_PATH/strip
+          
+          # 确保我们伪装好的 Clang bin 目录在 PATH 的绝对最前面
           export PATH=$CLANG_PATH:$GCC64_PATH:$GCC32_PATH:$PATH
           
           # 核心编译参数定义
@@ -62,21 +71,14 @@ jobs:
           # 1. 生成配置文件
           make O=out ARCH=arm64 crux_defconfig
           
-          # 2. 开始正式编译（显式补全 LLVM 链）
+          # 2. 开始正式编译（退回最标准的纯净 make 参数，靠上面的 PATH 软链接强行注入）
           echo "Starting make process..."
           make -j$(nproc --all) O=out \
                       ARCH=arm64 \
                       CC=clang \
-                      LD=ld.lld \
-                      AR=llvm-ar \
-                      NM=llvm-nm \
-                      OBJCOPY=llvm-objcopy \
-                      OBJDUMP=llvm-objdump \
-                      STRIP=llvm-strip \
                       CLANG_TRIPLE=aarch64-linux-gnu- \
                       CROSS_COMPILE=aarch64-linux-android- \
                       CROSS_COMPILE_ARM32=arm-linux-androideabi-
-                      
 
       - name: Verify and Package Output
         run: |
