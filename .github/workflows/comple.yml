@@ -5,7 +5,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest # 使用最快、不排队的最新的 GitHub Actions 服务器
+    runs-on: ubuntu-latest # 保持最快不排队的最新服务器
     steps:
       - name: Checkout Kernel Source
         uses: actions/checkout@v4
@@ -15,29 +15,28 @@ jobs:
       - name: Install Build Dependencies
         run: |
           sudo apt-get update
-          # 精简依赖：去掉了所有在新系统里绝迹的旧包
           sudo apt-get install -y bc build-essential libncurses5-dev libssl-dev texinfo \
             libgmp3-dev libmpfr-dev libmpc-dev libcap-dev zlib1g-dev python3 \
             bison flex ccache libelf-dev lz4 liblz4-tool libstdc++6 openjdk-11-jdk zip unzip curl git
 
-      - name: Fetch Toolchains (AOSP Clang 11 & GCC)
+      - name: Fetch Toolchains (ZyC-Clang 2026 & AOSP GCC)
         run: |
           mkdir -p $GITHUB_WORKSPACE/toolchain
           cd $GITHUB_WORKSPACE/toolchain
           
-          # 下载最标准的官方 AOSP Clang 11
-          echo "Downloading AOSP Clang..."
-          curl -LO https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/android11-gsi/clang-r383902.tar.gz
-          mkdir -p clang
-          tar -xzf clang-r383902.tar.gz -C clang
+          # 1. 下载你指定的最新版 ZyC-Clang 16 (2026-05-10 编译版)
+          echo "Downloading latest ZyC-Clang 16..."
+          curl -LO https://github.com/ZyCromerZ/Clang/releases/download/16.0.6-20260510-release/Clang-16.0.6-20260510.tar.gz
+          mkdir -p zyc-clang
+          tar -xzf Clang-16.0.6-20260510.tar.gz -C zyc-clang
           
-          # 下载官方 AOSP GCC 64位
+          # 2. 下载官方 AOSP GCC 64位
           echo "Downloading GCC 64-bit..."
           curl -LO https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/android-11.0.0_r47.tar.gz
           mkdir -p gcc64
           tar -xzf android-11.0.0_r47.tar.gz -C gcc64
           
-          # 下载官方 AOSP GCC 32位
+          # 3. 下载官方 AOSP GCC 32位
           echo "Downloading GCC 32-bit..."
           curl -LO https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/+archive/refs/tags/android-11.0.0_r47.tar.gz
           mkdir -p gcc32
@@ -47,14 +46,18 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE
           
-          # 定义绝对路径变量
-          export CLANG_PATH=$GITHUB_WORKSPACE/toolchain/clang/bin
+          # 自动适配新版 ZyC 目录结构：如果 bin 目录在下一层则自动识别，否则使用根目录
+          if [ -d "$GITHUB_WORKSPACE/toolchain/zyc-clang/bin" ]; then
+            export CLANG_PATH=$GITHUB_WORKSPACE/toolchain/zyc-clang/bin
+          else
+            export CLANG_PATH=$GITHUB_WORKSPACE/toolchain/zyc-clang
+          fi
+          
           export GCC64_PATH=$GITHUB_WORKSPACE/toolchain/gcc64/bin
           export GCC32_PATH=$GITHUB_WORKSPACE/toolchain/gcc32/bin
           
-          # 【关键保护点】只把 GCC 交叉链放进 PATH，绝对不放 CLANG_PATH！
-          # 这样可以确保 Ubuntu 自己的机器在编译本地脚本（HostCC）时，永远调用原厂环境，不报 relr.dyn 错误。
-          export PATH=$GCC64_PATH:$GCC32_PATH:$PATH
+          # 注入环境变量，让最新版工具链覆盖构建环境
+          export PATH=$CLANG_PATH:$GCC64_PATH:$GCC32_PATH:$PATH
           
           export ARCH=arm64
           export SUBARCH=arm64
@@ -62,11 +65,17 @@ jobs:
           # 1. 生成配置文件
           make O=out ARCH=arm64 crux_defconfig
           
-          # 2. 正式编译：通过绝对路径将 $CLANG_PATH/clang 直接精准投喂给 CC
-          echo "Starting make process on ubuntu-latest..."
+          # 2. 正式编译：全面使用 2026 最新版 Clang 16 携带的 LLVM 体系
+          echo "Starting make process with latest ZyC-Clang..."
           make -j$(nproc --all) O=out \
                       ARCH=arm64 \
-                      CC=$CLANG_PATH/clang \
+                      CC=clang \
+                      LD=ld.lld \
+                      AR=llvm-ar \
+                      NM=llvm-nm \
+                      OBJCOPY=llvm-objcopy \
+                      OBJDUMP=llvm-objdump \
+                      STRIP=llvm-strip \
                       CLANG_TRIPLE=aarch64-linux-gnu- \
                       CROSS_COMPILE=aarch64-linux-android- \
                       CROSS_COMPILE_ARM32=arm-linux-androideabi-
