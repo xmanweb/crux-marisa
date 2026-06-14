@@ -5,7 +5,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest # 使用最新、无需排队的 GitHub Actions 服务器
     steps:
       - name: Checkout Kernel Source
         uses: actions/checkout@v4
@@ -19,25 +19,16 @@ jobs:
             libgmp3-dev libmpfr-dev libmpc-dev libcap-dev zlib1g-dev python3 \
             bison flex ccache libelf-dev lz4 liblz4-tool libstdc++6 openjdk-11-jdk zip unzip curl git
 
-      - name: Fetch Toolchains (ZyC-Clang 2026 & AOSP GCC)
+      - name: Fetch ZyC-Clang 16 Toolchain
         run: |
           mkdir -p $GITHUB_WORKSPACE/toolchain
           cd $GITHUB_WORKSPACE/toolchain
           
+          # 下载你指定的最新版 ZyC-Clang 16 (2026-05-10 编译版)
           echo "Downloading latest ZyC-Clang 16..."
           curl -LO https://github.com/ZyCromerZ/Clang/releases/download/16.0.6-20260510-release/Clang-16.0.6-20260510.tar.gz
           mkdir -p zyc-clang
           tar -xzf Clang-16.0.6-20260510.tar.gz -C zyc-clang
-          
-          echo "Downloading GCC 64-bit..."
-          curl -LO https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/android-11.0.0_r47.tar.gz
-          mkdir -p gcc64
-          tar -xzf android-11.0.0_r47.tar.gz -C gcc64
-          
-          echo "Downloading GCC 32-bit..."
-          curl -LO https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/+archive/refs/tags/android-11.0.0_r47.tar.gz
-          mkdir -p gcc32
-          tar -xzf android-11.0.0_r47.tar.gz -C gcc32
 
       - name: Start Kernel Compilation
         run: |
@@ -50,39 +41,36 @@ jobs:
             REAL_CLANG_PATH="$GITHUB_WORKSPACE/toolchain/zyc-clang"
           fi
           
-          export GCC64_PATH=$GITHUB_WORKSPACE/toolchain/gcc64/bin
-          export GCC32_PATH=$GITHUB_WORKSPACE/toolchain/gcc32/bin
+          # 将 ZyC-Clang 路径推到 PATH 的最前端，让 command -v 完美通过
+          export PATH=$REAL_CLANG_PATH:$PATH
           
-          # 【降维打击】建立最高优先级的环境拦截
-          # 这样不管是内核调用 clang, gcc 还是 ld.lld，都会被立刻导流到最新版 ZyC-Clang 中
-          mkdir -p $GITHUB_WORKSPACE/bin_override
-          ln -sf $REAL_CLANG_PATH/clang $GITHUB_WORKSPACE/bin_override/clang
-          ln -sf $REAL_CLANG_PATH/clang $GITHUB_WORKSPACE/bin_override/aarch64-linux-gnu-clang
-          ln -sf $REAL_CLANG_PATH/ld.lld $GITHUB_WORKSPACE/bin_override/ld.lld
-          ln -sf $REAL_CLANG_PATH/ld.lld $GITHUB_WORKSPACE/bin_override/ld
-          ln -sf $REAL_CLANG_PATH/llvm-ar $GITHUB_WORKSPACE/bin_override/llvm-ar
-          ln -sf $REAL_CLANG_PATH/llvm-nm $GITHUB_WORKSPACE/bin_override/llvm-nm
-          ln -sf $REAL_CLANG_PATH/llvm-objcopy $GITHUB_WORKSPACE/bin_override/llvm-objcopy
-          ln -sf $REAL_CLANG_PATH/llvm-objdump $GITHUB_WORKSPACE/bin_override/llvm-objdump
-          ln -sf $REAL_CLANG_PATH/llvm-strip $GITHUB_WORKSPACE/bin_override/llvm-strip
-          
-          # 把我们强行包装好的覆盖目录放到 PATH 的最顶头
-          export PATH=$GITHUB_WORKSPACE/bin_override:$REAL_CLANG_PATH:$GCC64_PATH:$GCC32_PATH:$PATH
-          
-          export ARCH=arm64
-          export SUBARCH=arm64
+          # 验证编译器是否成功就位
+          if ! command -v clang >/dev/null 2>&1; then
+            echo "ERROR: clang does not exist, please check your environment."
+            exit 1
+          fi
           
           # 1. 生成配置文件
           make O=out ARCH=arm64 crux_defconfig
           
-          # 2. 正式编译（不传大堆绝对路径了，全靠上面的最高优先级 PATH 强行拦截注入）
-          echo "Starting make process with forced path overriding..."
-          make -j$(nproc --all) O=out \
+          # 2. 完美的参数投喂（完全复刻你找到的优秀标准范例）
+          echo "Starting make process with standard ZyC arguments..."
+          make -j$(nproc --all) \
                       ARCH=arm64 \
+                      SUBARCH=arm64 \
+                      O=out \
                       CC=clang \
+                      HOSTCC=clang \
                       CLANG_TRIPLE=aarch64-linux-gnu- \
-                      CROSS_COMPILE=aarch64-linux-android- \
-                      CROSS_COMPILE_ARM32=arm-linux-androideabi-
+                      CROSS_COMPILE=aarch64-linux-gnu- \
+                      CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+                      CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+                      LD=ld.lld \
+                      AR=llvm-ar \
+                      NM=llvm-nm \
+                      OBJCOPY=llvm-objcopy \
+                      OBJDUMP=llvm-objdump \
+                      STRIP=llvm-strip
 
       - name: Verify and Package Output
         run: |
