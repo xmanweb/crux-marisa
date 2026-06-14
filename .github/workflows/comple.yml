@@ -24,7 +24,7 @@ jobs:
           mkdir -p $GITHUB_WORKSPACE/toolchain
           cd $GITHUB_WORKSPACE/toolchain
           
-          # 下载你指定的最新版 ZyC-Clang 16 (2026-05-10 编译版)
+          # 下载最新版 ZyC-Clang 16 (2026-05-10 编译版)
           echo "Downloading latest ZyC-Clang 16..."
           curl -LO https://github.com/ZyCromerZ/Clang/releases/download/16.0.6-20260510-release/Clang-16.0.6-20260510.tar.gz
           mkdir -p zyc-clang
@@ -41,19 +41,13 @@ jobs:
             REAL_CLANG_PATH="$GITHUB_WORKSPACE/toolchain/zyc-clang"
           fi
           
-          # 将 ZyC-Clang 路径推到 PATH 的最前端，让 command -v 完美通过
+          # 将 ZyC-Clang 路径推到 PATH 的最前端
           export PATH=$REAL_CLANG_PATH:$PATH
-          
-          # 验证编译器是否成功就位
-          if ! command -v clang >/dev/null 2>&1; then
-            echo "ERROR: clang does not exist, please check your environment."
-            exit 1
-          fi
           
           # 1. 生成配置文件
           make O=out ARCH=arm64 crux_defconfig
           
-          # 2. 完美的参数投喂（完全复刻你找到的优秀标准范例）
+          # 2. 完美的参数投喂开始编译
           echo "Starting make process with standard ZyC arguments..."
           make -j$(nproc --all) \
                       ARCH=arm64 \
@@ -72,22 +66,45 @@ jobs:
                       OBJDUMP=llvm-objdump \
                       STRIP=llvm-strip
 
-      - name: Verify and Package Output
+      - name: Pack Kernel with AnyKernel3
         run: |
           cd $GITHUB_WORKSPACE
           if [ -f "out/arch/arm64/boot/Image.gz-dtb" ]; then
-            echo "Kernel compiled successfully!"
-            mkdir -p output
-            cp out/arch/arm64/boot/Image.gz-dtb output/
-            find out/ -name "*.ko" -exec cp {} output/ \; 2>/dev/null || true
-            cd output && zip -r ../crux-kernel-clean.zip *
+            echo "Kernel compiled successfully! Preparing AnyKernel3..."
+            
+            # 1. 克隆官方 AnyKernel3 模板
+            git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+            
+            # 2. 移除模板中自带的无用占位文件
+            rm -rf AnyKernel3/.git AnyKernel3/README.md AnyKernel3/Image* AnyKernel3/zImage*
+            
+            # 3. 核心配置修改：配置 crux (小米9 Pro) 的设备参数
+            # block 指向的是 crux 的 boot 分区路径 (/dev/block/bootdevice/by-name/boot)
+            sed -i 's/kernel.string=./kernel.string=Crux Custom Kernel by xmanweb/g' AnyKernel3/anykernel.sh
+            sed -i 's/device.name1=./device.name1=crux/g' AnyKernel3/anykernel.sh
+            sed -i 's/device.name2=./device.name2=crux_pro/g' AnyKernel3/anykernel.sh
+            sed -i 's|block=/dev/block/platform/omap/omap_hsmmc.0/by-name/boot;|block=/dev/block/bootdevice/by-name/boot;|g' AnyKernel3/anykernel.sh
+            sed -i 's/is_slot_device=0;/is_slot_device=0;/g' AnyKernel3/anykernel.sh # crux 是非 A/B 分区设备
+            
+            # 4. 把刚刚编译出来的 Image.gz-dtb 复制进 AnyKernel3 根目录
+            cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/Image.gz-dtb
+            
+            # 5. 自动收集并打包编译出来的内核模块 (*.ko)
+            echo "Copying vendor modules..."
+            find out/ -name "*.ko" -exec cp {} AnyKernel3/ \; 2>/dev/null || true
+            
+            # 6. 生成最终的第三方 Recovery 刷机包
+            cd AnyKernel3
+            zip -r ../crux-kernel-anykernel3.zip *
+            cd ..
+            echo "AnyKernel3 flashable zip created successfully!"
           else
             echo "ERROR: Kernel image not found. Compilation might have failed."
             exit 1
           fi
 
-      - name: Upload Kernel Artifact
+      - name: Upload Flashable Kernel Zip
         uses: actions/upload-artifact@v4
         with:
-          name: crux-kernel-clean
-          path: crux-kernel-clean.zip
+          name: crux-kernel-flashable
+          path: crux-kernel-anykernel3.zip
