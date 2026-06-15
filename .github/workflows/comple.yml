@@ -105,27 +105,42 @@ jobs:
           export PATH=$REAL_CLANG_PATH:$PATH
 
           # =====================================================================
-          # 【像素级破局】满足 ReSukiSU 绝对行号与无宏审计要求的精准 Python 注入
+          # 【维度打击】把外部声明剥离到头文件，让 input.c 切片内 100% 纯净无异物
           # =====================================================================
-          echo "Executing precision ReSukiSU-compliant Python rewrite for input.c..."
+          echo "Executing advanced head-file split injection for ReSukiSU audit..."
           
           python3 -c '
+          # 1. 把外部声明偷偷塞进全局必然引用的 drivers/input/input.h 的头部
+          with open("drivers/input/input.h", "r") as f:
+              h_code = f.read()
+          
+          header_declarations = "\nextern bool ksu_input_hook __read_mostly;\nextern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);\n"
+          
+          if "ksu_handle_input_handle_event" not in h_code:
+              with open("drivers/input/input.h", "w") as f:
+                  f.write(header_declarations + h_code)
+              print("Successfully injected declarations into input.h")
+
+          # 2. 让 input.c 的特定行号区间内“只保留赤裸的 Hook 调用”，不带有任何声明和宏
           with open("drivers/input/input.c", "r") as f:
-              code = f.read()
+              c_code = f.read()
 
-          # 定义核心锚点
           target_anchor = "if (is_event_supported(type, dev->evbit, EV_MAX)) {"
+          # 100% 严格吻合 EXPECTED_INPUT_HOOK 去除空格后的形态，绝不添加多余字节
+          pure_clean_hook = "if (is_event_supported(type, dev->evbit, EV_MAX)) {\n\t\tif (unlikely(ksu_input_hook))\n\t\t\tksu_handle_input_handle_event(&type, &code, &value);"
 
-          # 将声明与调用“并排打包”，完全不带宏，100% 保证切片内同时含有这两者且无多余杂质
-          pure_bundled_hook = "if (is_event_supported(type, dev->evbit, EV_MAX)) {\n\t\textern bool ksu_input_hook __read_mostly;\n\t\textern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);\n\t\tif (unlikely(ksu_input_hook))\n\t\t\tksu_handle_input_handle_event(&type, &code, &value);"
+          # 彻底清除之前尝试中留在 input.c 的所有脏数据，确保重新应用
+          if "ksu_handle_input_handle_event" in c_code:
+              print("Notice: Resetting input.c to generic state first...")
+              # 简单的原地重置（如果包含了旧的嵌入，先粗暴换回标准锚点，防止叠加）
+              import re
+              c_code = re.sub(r"if \(is_event_supported\(type, dev->evbit, EV_MAX\)\) \{.*ksu_handle_input_handle_event\(&type, &code, &value\);", target_anchor, c_code, flags=re.DOTALL)
 
-          if target_anchor in code and "ksu_handle_input_handle_event" not in code:
-              code_final = code.replace(target_anchor, pure_bundled_hook)
+          if target_anchor in c_code:
+              c_code_final = c_code.replace(target_anchor, pure_clean_hook)
               with open("drivers/input/input.c", "w") as f:
-                  f.write(code_final)
-              print("ReSukiSU line-range bundled hook injection successfully completed!")
-          else:
-              print("Warning: Anchor not found or already injected.")
+                  f.write(c_code_final)
+              print("Pure clean injection into input.c completed!")
           '
 
           # =====================================================================
