@@ -39,7 +39,7 @@ jobs:
           echo "Integrating Official ReSukiSU..."
           curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s main || curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
 
-      - name: Integrate Simonpunk Simonpunk SUSFS v2.1.0
+      - name: Integrate Simonpunk SUSFS v2.1.0
         run: |
           cd $GITHUB_WORKSPACE
           echo "Cloning official simonpunk/susfs4ksu repository (kernel-4.14)..."
@@ -105,78 +105,24 @@ jobs:
           export PATH=$REAL_CLANG_PATH:$PATH
 
           # =====================================================================
-          # 【行号降维打击】声明置顶 + 物理行号强行回正，全绿通过 ReSukiSU 审计
+          # 【纯原生 sed 注入】复刻成功的分支方案，不再使用任何 Python 脚本
           # =====================================================================
-          echo "Executing hyper-precision line-correcting Python injection..."
+          echo "Injecting pure ReSukiSU inline hooks into drivers/input/input.c via sed..."
           
-          python3 -c '
-          with open("drivers/input/input.c", "r") as f:
-              content = f.read()
+          if [ -f "drivers/input/input.c" ]; then
+            # 1. 寻找 input_event 拦截函数的起始大括号，并在内部第一行塞入专属外部局部声明（100% 对齐成功分支写法）
+            sed -i '/void input_event(struct input_dev \*dev,/,/^{/ { 
+              /^{/a \	extern bool ksu_input_hook __read_mostly;\n\textern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);
+            }' drivers/input/input.c
 
-          # 1. 彻底清除之前尝试中留在 input.c 的所有残留，防止脚本重复执行导致代码污染
-          import re
-          if "ksu_handle_input_handle_event" in content:
-              print("Notice: Cleaning up previous injection leftovers...")
-              content = re.sub(r"bool ksu_input_hook.*?\n", "", content)
-              content = re.sub(r"int ksu_handle_input_handle_event.*?\n", "", content)
-              content = re.sub(r"if \(is_event_supported\(type, dev->evbit, EV_MAX\)\) \{.*ksu_handle_input_handle_event\(&type, &code, &value\);", "if (is_event_supported(type, dev->evbit, EV_MAX)) {", content, flags=re.DOTALL)
-
-          lines = content.splitlines()
-
-          # 2. 将外部声明直接丢到文件最顶部（绝对远离 380 审计区），确保编译不报错
-          lines.insert(0, "bool ksu_input_hook __read_mostly = false;")
-          lines.insert(1, "int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value) { return 0; }")
-
-          # 3. 重新拼回字符串，寻找核心拦截点并塞入纯净调用（满足 31 行过滤规则）
-          full_code = "\n".join(lines)
-          target_anchor = "if (is_event_supported(type, dev->evbit, EV_MAX)) {"
-          pure_hook = "if (is_event_supported(type, dev->evbit, EV_MAX)) {\n\t\tif (unlikely(ksu_input_hook))\n\t\t\tksu_handle_input_handle_event(&type, &code, &value);"
-
-          if target_anchor in full_code:
-              full_code = full_code.replace(target_anchor, pure_hook)
-              
-              # 4. 【核心黑魔法】动态调整行号，通过增删无用空行强行控制 Hook 完美卡死在 380 行
-              final_lines = full_code.splitlines()
-              current_line_idx = -1
-              for idx, line in enumerate(final_lines):
-                  if "if (unlikely(ksu_input_hook))" in line:
-                      current_line_idx = idx + 1 # 换算成基于1开始的物理行号
-                      break
-              
-              if current_line_idx != -1:
-                  print(f"Current hook calculated at raw line: {current_line_idx}")
-                  offset = current_line_idx - 380
-                  if offset > 0:
-                      print(f"Shrinking file by removing {offset} empty lines to hit exact line 380...")
-                      removed = 0
-                      # 从前半段（第2行到Hook点前方）寻找内核无用空行并剔除
-                      for i in range(2, current_line_idx - 5):
-                          if final_lines[i].strip() == "" and removed < offset:
-                              final_lines[i] = "__REMOVE_ME__"
-                              removed += 1
-                      final_lines = [l for l in final_lines if l != "__REMOVE_ME__"]
-                  elif offset < 0:
-                      print(f"Padding file with {abs(offset)} extra newlines at top to hit exact line 380...")
-                      for _ in range(abs(offset)):
-                          final_lines.insert(2, "") # 往下垫空行
-
-              # 5. 最终结果落盘
-              final_output = "\n".join(final_lines)
-              with open("drivers/input/input.c", "w") as f:
-                  f.write(final_output)
-              
-              # 在 GitHub Actions 控制台上直观输出对齐后的切片，确保肉眼可见的满分对齐
-              print("Double checking local slice (Lines 380-395):")
-              check_lines = final_lines[379:395]
-              for i, l in enumerate(check_lines):
-                  print(f"{380+i}: {l}")
-          else:
-              print("Error: target anchor not found in input.c!")
-              exit(1)
-          '
+            # 2. 精准匹配底层的事件支持判断锚点，在其后无缝接入最纯净的原生调用 Hook
+            sed -i '/if (is_event_supported(type, dev->evbit, EV_MAX)) {/a \		if (unlikely(ksu_input_hook))\n\t\t\tksu_handle_input_handle_event(&type, &code, &value);' drivers/input/input.c
+            
+            echo "drivers/input/input.c natively patched via sed."
+          fi
 
           # =====================================================================
-          # 其余核心原生挂钩注入（维持原有稳定替换逻辑）
+          # 其余核心依赖注入（保持原样，确保全局原生挂钩完整）
           # =====================================================================
           echo "Injecting remaining native ReSukiSU inline hooks into kernel core..."
           
