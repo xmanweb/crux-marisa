@@ -1,4 +1,4 @@
-name: Compile Crux Kernel (ReSukiSU & SUSFS 2.1)
+name: Compile Crux Kernel (ReSukiSU & SUSFS 2.1 - Native Hook)
 
 on:
   workflow_dispatch:
@@ -102,13 +102,39 @@ jobs:
           export PATH=$REAL_CLANG_PATH:$PATH
 
           # =====================================================================
-          # 1. 生成原本的基础默认配置
+          # 【纯正原生挂钩注入】注入 ReSukiSU 官方标准的普通 Inline Hook 接入点
           # =====================================================================
+          echo "Injecting native ReSukiSU inline hooks into kernel core..."
+          
+          # 1. kernel/sys.c
+          if [ -f "kernel/sys.c" ]; then
+            sed -i '/kuid_t kruid, keuid, ksuid;/i \	extern int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);\n\tksu_handle_setresuid(ruid, euid, suid);' kernel/sys.c
+          fi
+
+          # 2. fs/open.c
+          if [ -f "fs/open.c" ]; then
+            sed -i '/if (mode & ~S_IRWXO)/i \	extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n\tksu_handle_faccessat(&dfd, &filename, (int *)&mode, NULL);' fs/open.c
+          fi
+
+          # 3. fs/exec.c
+          if [ -f "fs/exec.c" ]; then
+            sed -i '/retval = bprm_mm_init(bprm);/i \	extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);' fs/exec.c
+          fi
+
+          # 4. fs/stat.c
+          if [ -f "fs/stat.c" ]; then
+            sed -i '/error = vfs_fstatat(dfd, filename, &stat, flag);/i \	extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\n\tksu_handle_stat(&dfd, &filename, &flag);' fs/stat.c
+          fi
+
+          # 5. fs/read_write.c
+          if [ -f "fs/read_write.c" ]; then
+            sed -i '/if (unlikely(ret <= 0))/i \	extern int ksu_handle_sys_read(struct file **file_ptr, char __user **buf_ptr, size_t *count_ptr, loff_t **pos_ptr);\n\tksu_handle_sys_read(&file, (char __user **)&buf, &count, &pos);' fs/read_write.c
+          fi
+
+          # 生成原本的基础默认配置
           make O=out ARCH=arm64 crux_defconfig
           
-          # =====================================================================
-          # 2. 完全采用成功项目的纯净配置（剔除任何 MANUAL_HOOK 开关）
-          # =====================================================================
+          # 完全采用纯净配置，剔除任何 MANUAL_HOOK
           echo "Injecting explicit config definitions using provided configuration..."
           ./scripts/config --file out/.config \
               -e KSU \
@@ -125,9 +151,7 @@ jobs:
               -e KSU_SUSFS_SUS_MAP \
               -e KSU_MULTI_MANAGER_SUPPORT
 
-          # =====================================================================
-          # 3. 刷新并锁定依赖
-          # =====================================================================
+          # 刷新并锁定依赖
           echo "Syncing configs via silentoldconfig..."
           make O=out ARCH=arm64 silentoldconfig
 
@@ -177,7 +201,7 @@ jobs:
             echo 'do.systemless=1' >> AnyKernel3/anykernel.sh
             echo 'do.cleanup=1' >> AnyKernel3/anykernel.sh
             echo 'do.cleanuponabort=1' >> AnyKernel3/anykernel.sh
-            echo 'device.name1=crux' >> AnyKernel3/anykernel.sh
+            echo device.name1=crux >> AnyKernel3/anykernel.sh
             echo 'device.name2=' >> AnyKernel3/anykernel.sh
             echo 'device.name3=' >> AnyKernel3/anykernel.sh
             echo 'device.name4=' >> AnyKernel3/anykernel.sh
