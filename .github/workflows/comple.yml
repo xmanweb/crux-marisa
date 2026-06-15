@@ -105,13 +105,17 @@ jobs:
           export PATH=$REAL_CLANG_PATH:$PATH
 
           # =====================================================================
-          # 【高兼容性原生挂钩注入】精准锁定核心函数的执行入口
+          # 【原生挂钩注入】补全最后一个 sys_reboot 钩子
           # =====================================================================
           echo "Injecting native ReSukiSU inline hooks into kernel core..."
           
-          # 1. kernel/sys.c (处理 setresuid)
+          # 1. kernel/sys.c (同时注入 setresuid 和 sys_reboot)
           if [ -f "kernel/sys.c" ]; then
+            # 注入 setresuid
             sed -i '/kuid_t kruid, keuid, ksuid;/i \	extern int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);\n\tksu_handle_setresuid(ruid, euid, suid);' kernel/sys.c
+            
+            # 注入 sys_reboot (定位在 reboot 系统调用入口处)
+            sed -i '/SYSCALL_DEFINE4(reboot,/a \	extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user *arg);\n\tksu_handle_sys_reboot(magic1, magic2, cmd, arg);' kernel/sys.c
           fi
 
           # 2. fs/open.c (处理 faccessat)
@@ -124,7 +128,7 @@ jobs:
             sed -i '/retval = bprm_mm_init(bprm);/i \	extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);' fs/exec.c
           fi
 
-          # 4. fs/stat.c (处理 stat) - 直接通过关键本地变量声明区作为锚点，彻底避开函数声明差异
+          # 4. fs/stat.c (处理 stat)
           if [ -f "fs/stat.c" ]; then
             sed -i '/struct path path;/a \	extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\n\tksu_handle_stat(&dfd, &filename, &flag);' fs/stat.c
           fi
@@ -239,7 +243,7 @@ jobs:
           fi
 
       - name: Upload Flashable Kernel Zip
-        uses: Actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ env.FINAL_ZIP_NAME }}
           path: ${{ env.FINAL_ZIP_NAME }}
