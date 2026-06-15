@@ -105,24 +105,22 @@ jobs:
           export PATH=$REAL_CLANG_PATH:$PATH
 
           # =====================================================================
-          # 【纯原生 sed 注入】复刻成功的分支方案，不再使用任何 Python 脚本
+          # 【单行无缝纯净替换】彻底解决 sed 多余折行导致的 31 行不兼容报错
           # =====================================================================
-          echo "Injecting pure ReSukiSU inline hooks into drivers/input/input.c via sed..."
+          echo "Injecting verified single-line ReSukiSU inline hooks via sed..."
           
           if [ -f "drivers/input/input.c" ]; then
-            # 1. 寻找 input_event 拦截函数的起始大括号，并在内部第一行塞入专属外部局部声明（100% 对齐成功分支写法）
-            sed -i '/void input_event(struct input_dev \*dev,/,/^{/ { 
-              /^{/a \	extern bool ksu_input_hook __read_mostly;\n\textern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);
-            }' drivers/input/input.c
+            # 1. 寻找 input_event 拦截函数定义起点的局部声明处，无缝塞入外部引用
+            sed -i 's/void input_event(struct input_dev \*dev, unsigned int type, unsigned int code, int value)/void input_event(struct input_dev *dev, unsigned int type, unsigned int code, int value) {\n\textern bool ksu_input_hook __read_mostly;\n\textern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);/g' drivers/input/input.c
 
-            # 2. 精准匹配底层的事件支持判断锚点，在其后无缝接入最纯净的原生调用 Hook
-            sed -i '/if (is_event_supported(type, dev->evbit, EV_MAX)) {/a \		if (unlikely(ksu_input_hook))\n\t\t\tksu_handle_input_handle_event(&type, &code, &value);' drivers/input/input.c
+            # 2. 【核心对齐点】完美复刻 sm8250 成功项目的格式，不添加任何可能干扰单行 filter-out 审计的格式字符
+            sed -i 's/if (is_event_supported(type, dev->evbit, EV_MAX)) {/if (is_event_supported(type, dev->evbit, EV_MAX)) {\n\t\tif (unlikely(ksu_input_hook)) ksu_handle_input_handle_event(\&type, \&code, \&value);/g' drivers/input/input.c
             
-            echo "drivers/input/input.c natively patched via sed."
+            echo "drivers/input/input.c single-line style injection finished."
           fi
 
           # =====================================================================
-          # 其余核心依赖注入（保持原样，确保全局原生挂钩完整）
+          # 其余核心依赖注入
           # =====================================================================
           echo "Injecting remaining native ReSukiSU inline hooks into kernel core..."
           
@@ -160,7 +158,7 @@ jobs:
           # 生成原本的基础默认配置
           make O=out ARCH=arm64 crux_defconfig
           
-          # 显式激活编译配置项，保证底层调用逻辑编译进内核
+          # 显式激活编译配置项
           echo "Injecting explicit config definitions using provided configuration..."
           ./scripts/config --file out/.config \
               -e KSU \
