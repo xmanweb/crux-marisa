@@ -1,6 +1,9 @@
 name: Compile Crux Kernel (ReSukiSU & SUSFS 2.1 - Native Hook)
 
 on:
+  push:
+    branches:
+      - test
   workflow_dispatch:
 
 jobs:
@@ -102,7 +105,7 @@ jobs:
           export PATH=$REAL_CLANG_PATH:$PATH
 
           # =====================================================================
-          # 【高兼容性原生挂钩注入】替换为更通用、更稳妥的上下文定位锚点
+          # 【高兼容性原生挂钩注入】精准锁定核心函数的执行入口
           # =====================================================================
           echo "Injecting native ReSukiSU inline hooks into kernel core..."
           
@@ -121,12 +124,12 @@ jobs:
             sed -i '/retval = bprm_mm_init(bprm);/i \	extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);' fs/exec.c
           fi
 
-          # 4. fs/stat.c (处理 stat) - 换用更稳妥的函数开头作为注入锚点
+          # 4. fs/stat.c (处理 stat) - 直接通过关键本地变量声明区作为锚点，彻底避开函数声明差异
           if [ -f "fs/stat.c" ]; then
-            sed -i '/int vfs_fstatat(int dfd, const char __user \*filename,/a \	extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\n\tksu_handle_stat(&dfd, &filename, &flag);' fs/stat.c
+            sed -i '/struct path path;/a \	extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\n\tksu_handle_stat(&dfd, &filename, &flag);' fs/stat.c
           fi
 
-          # 5. fs/read_write.c (处理 sys_read) - 直接对准 vfs_read 的核心逻辑或文件末尾注入文本通过 grep 扫描
+          # 5. fs/read_write.c (处理 sys_read)
           if [ -f "fs/read_write.c" ]; then
             sed -i '/ssize_t vfs_read(struct file \*file, char __user \*buf, size_t count, loff_t \*pos)/a \	extern int ksu_handle_sys_read(struct file **file_ptr, char __user **buf_ptr, size_t *count_ptr, loff_t **pos_ptr);\n\tksu_handle_sys_read(&file, (char __user **)&buf, &count, &pos);' fs/read_write.c
           fi
@@ -236,7 +239,7 @@ jobs:
           fi
 
       - name: Upload Flashable Kernel Zip
-        uses: actions/upload-artifact@v4
+        uses: Actions/upload-artifact@v4
         with:
           name: ${{ env.FINAL_ZIP_NAME }}
           path: ${{ env.FINAL_ZIP_NAME }}
