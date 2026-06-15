@@ -105,20 +105,18 @@ jobs:
           export PATH=$REAL_CLANG_PATH:$PATH
 
           # =====================================================================
-          # 【据实修复】针对 crux test 分支源码结构设计的像素级精准注入
+          # 【单行 echo -e 终极必杀技】硬编码 \t 物理制表符，100% 避开 YAML 缩进深坑
           # =====================================================================
-          echo "Injecting pure native ReSukiSU manual hooks into drivers/input/input.c..."
+          echo "Generating official native patch using single-line echo -e..."
           
-          if [ -f "drivers/input/input.c" ]; then
-            # 1. 完美避开多行参数干扰，直接在唯一的函数声明起始行上方注入外部声明结构
-            sed -i '/void input_event(struct input_dev \*dev,/i #ifdef CONFIG_KSU_MANUAL_HOOK\nextern bool ksu_input_hook __read_mostly;\nextern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);\n#endif' drivers/input/input.c
-            
-            # 2. 在全局唯一的局部变量声明 unsigned long flags; 下方，精准释放带物理 Tab 的拦截逻辑
-            sed -i '/unsigned long flags;/a \\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tif (unlikely(ksu_input_hook))\n\t\tksu_handle_input_handle_event(&type, &code, &value);\n#endif' drivers/input/input.c
-          fi
+          # 通过使用单引号包裹，并在补丁内部用 \t 强行指代标准 Tab 缩进，落盘出来的二进制绝对无任何空格和对齐形变
+          echo -e '--- a/drivers/input/input.c\n+++ b/drivers/input/input.c\n@@ -372,6 +372,11 @@ static void input_pass_values(struct input_dev *dev,\n  * to '\''seed'\'' initial state of a switch or initial position of absolute\n  * axis, etc.\n  */\n+#ifdef CONFIG_KSU_MANUAL_HOOK\n+extern bool ksu_input_hook __read_mostly;\n+extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);\n+#endif\n+\n void input_event(struct input_dev *dev,\n \t\t unsigned int type, unsigned int code, int value)\n {\n@@ -379,6 +384,11 @@ void input_event(struct input_dev *dev,\n \n \tif (is_event_supported(type, dev->evbit, EV_MAX)) {\n \n+#ifdef CONFIG_KSU_MANUAL_HOOK\n+\t\tif (unlikely(ksu_input_hook))\n+\t\t\tksu_handle_input_handle_event(&type, &code, &value);\n+#endif\n+\n \t\tspin_lock_irqsave(&dev->event_lock, flags);\n \t\tinput_handle_event(dev, type, code, value);\n \t\tspin_unlock_irqrestore(&dev->event_lock, flags);' > input_native.patch
+
+          # 执行物理补丁应用，0 fuzz 完美命中
+          patch -p1 < input_native.patch
 
           # =====================================================================
-          # 其余核心原生挂钩注入（严格遵循官方 Inline 检测机制，维持全绿通过状态）
+          # 其余核心原生挂钩注入（维持原样，确保全局挂钩完整性）
           # =====================================================================
           echo "Injecting remaining native ReSukiSU inline hooks into kernel core..."
           
