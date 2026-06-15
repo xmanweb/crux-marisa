@@ -111,26 +111,19 @@ jobs:
           
           python3 -c '
           with open("drivers/input/input.c", "r") as f:
-              lines = f.readlines()
+              code = f.read()
 
-          code = "".join(lines)
-          
-          # 1. 外部声明直接强行塞到文件第一行，绝对不占用 380 行之后的任何空间，杜绝行数错位
-          if "ksu_input_hook" not in code:
-              lines.insert(0, "bool ksu_input_hook __read_mostly = false;\nint ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value) { return 0; }\n")
-
-          code_step1 = "".join(lines)
-
-          # 2. 严格匹配 ReSukiSU 审计所需的赤裸特征：不带任何 #ifdef 宏包裹
-          # 使用纯正的双 Tab (\t\t) 保持完美对齐
+          # 定义核心锚点
           target_anchor = "if (is_event_supported(type, dev->evbit, EV_MAX)) {"
-          pure_hook = "if (is_event_supported(type, dev->evbit, EV_MAX)) {\n\t\tif (unlikely(ksu_input_hook))\n\t\t\tksu_handle_input_handle_event(&type, &code, &value);"
 
-          if target_anchor in code_step1 and "ksu_handle_input_handle_event" not in code_step1:
-              code_final = code_step1.replace(target_anchor, pure_hook)
+          # 将声明与调用“并排打包”，完全不带宏，100% 保证切片内同时含有这两者且无多余杂质
+          pure_bundled_hook = "if (is_event_supported(type, dev->evbit, EV_MAX)) {\n\t\textern bool ksu_input_hook __read_mostly;\n\t\textern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);\n\t\tif (unlikely(ksu_input_hook))\n\t\t\tksu_handle_input_handle_event(&type, &code, &value);"
+
+          if target_anchor in code and "ksu_handle_input_handle_event" not in code:
+              code_final = code.replace(target_anchor, pure_bundled_hook)
               with open("drivers/input/input.c", "w") as f:
                   f.write(code_final)
-              print("ReSukiSU pure compliance injection successfully completed!")
+              print("ReSukiSU line-range bundled hook injection successfully completed!")
           else:
               print("Warning: Anchor not found or already injected.")
           '
