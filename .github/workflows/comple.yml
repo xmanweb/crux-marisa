@@ -101,59 +101,15 @@ jobs:
           fi
           export PATH=$REAL_CLANG_PATH:$PATH
 
-          echo "Injecting full ReSukiSU Manual Hooks..."
-          if [ -f "fs/stat.c" ]; then
-            sed -i '/#include <linux\/uaccess.h>/a #include <linux/compat.h>\n#ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot)) extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\nextern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);\n#ifdef CONFIG_COMPAT\nstruct compat_stat64;\nextern void ksu_handle_fstat64_ret(unsigned int *fd, struct compat_stat64 __user **statbuf_ptr);\n#endif\n#endif' fs/stat.c
-            sed -i 's/error = vfs_fstatat/#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_stat(\&dfd, \&filename, \&flag);\n#endif\n\terror = vfs_fstatat/g' fs/stat.c
-            sed -i 's/error = cp_new_stat(&stat, statbuf);/error = cp_new_stat(\&stat, statbuf);\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tif (!error) ksu_handle_newfstat_ret(\&fd, \&statbuf);\n#endif/g' fs/stat.c
-            sed -i 's/error = cp_compat_stat64(&stat, statbuf);/error = cp_compat_stat64(\&stat, statbuf);\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tif (!error) ksu_handle_fstat64_ret(\&fd, (struct compat_stat64 __user **)\&statbuf);\n#endif/g' fs/stat.c
-          fi
-
-          if [ -f "fs/exec.c" ]; then
-            sed -i '1i #ifdef CONFIG_KSU_MANUAL_HOOK\n#include <linux/binfmts.h>\n__attribute__((hot)) extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n#endif' fs/exec.c
-            sed -i 's/retval = bprm_mm_init(bprm)/#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_execveat(\&fd, \&filename, \&argv, \&envp, \&flags);\n#endif\n\tretval = bprm_mm_init(bprm)/g' fs/exec.c
-          fi
-
-          if [ -f "fs/open.c" ]; then
-            sed -i '/#include <linux\/falloc.h>/a #ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot)) extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n#endif' fs/open.c
-            sed -i 's/if (mode & ~S_IRWXO)/#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_faccessat(\&dfd, \&filename, (int *)\&mode, NULL);\n#endif\n\tif (mode \& ~S_IRWXO)/g' fs/open.c
-          fi
-
-          if [ -f "kernel/reboot.c" ]; then
-            sed -i '1i #ifdef CONFIG_KSU_MANUAL_HOOK\nextern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n#endif' kernel/reboot.c
-            sed -i 's/case LINUX_REBOOT_CMD_RESTART:/#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_sys_reboot(magic1, magic2, cmd, \&arg);\n#endif\n\tcase LINUX_REBOOT_CMD_RESTART:/g' kernel/reboot.c
-          fi
-
-          if [ -f "fs/read_write.c" ]; then
-            sed -i '/#include <linux\/compat.h>/a #ifdef CONFIG_KSU_MANUAL_HOOK\nextern bool ksu_init_rc_hook __read_mostly;\nextern __attribute__((cold)) int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr, size_t *count_ptr);\n#endif' fs/read_write.c
-            rm -f ksys_read.patch
-            echo '--- a/fs/read_write.c' >> ksys_read.patch
-            echo '+++ b/fs/read_write.c' >> ksys_read.patch
-            echo '@@ -576,4 +576,7 @@' >> ksys_read.patch
-            echo ' ssize_t ksys_read(unsigned int fd, char __user *buf, size_t count)' >> ksys_read.patch
-            echo ' {' >> ksys_read.patch
-            echo '+#ifdef CONFIG_KSU_MANUAL_HOOK' >> ksys_read.patch
-            echo '+	if (unlikely(ksu_init_rc_hook)) ksu_handle_sys_read(fd, (char __user **)&buf, &count);' >> ksys_read.patch
-            echo '+#endif' >> ksys_read.patch
-            echo ' 	struct fd f = fdget_pos(fd);' >> ksys_read.patch
-            echo ' 	ssize_t ret = -EBADF;' >> ksys_read.patch
-            patch -p1 < ksys_read.patch
-            rm -f ksys_read.patch
-          fi
-
-          if [ -f "kernel/sys.c" ]; then
-            sed -i '/#include <linux\/uidgid.h>/a #ifdef CONFIG_KSU_MANUAL_HOOK\nextern int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);\n#endif' kernel/sys.c
-            sed -i 's/kuid_t kruid, keuid, ksuid;/#ifdef CONFIG_KSU_MANUAL_HOOK\n\t(void)ksu_handle_setresuid(ruid, euid, suid);\n#endif\n\tkuid_t kruid, keuid, ksuid;/g' kernel/sys.c
-          fi
-
           # =====================================================================
+          # 【彻底排雷】这里不再进行任何手工的系统调用桩点注入（如 fs/stat.c, fs/read_write.c）
+          # 完全移除冲突源，让 ReSukiSU 内部的 Inline 校验机制保持纯净通过
+          # =====================================================================
+
           # 1. 生成原本的基础默认配置
-          # =====================================================================
           make O=out ARCH=arm64 crux_defconfig
           
-          # =====================================================================
           # 2. 完全采用你给出的成功项目的正规 scripts/config 方式进行配置注入
-          # =====================================================================
           echo "Injecting explicit config definitions using provided configuration..."
           ./scripts/config --file out/.config \
               -e KSU \
@@ -168,15 +124,9 @@ jobs:
               -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
               -e KSU_SUSFS_OPEN_REDIRECT \
               -e KSU_SUSFS_SUS_MAP \
-              -e KSU_MULTI_MANAGER_SUPPORT \
-              -e KSU_MANUAL_HOOK \
-              -e KSU_MANUAL_HOOK_AUTO_INPUT_HOOK \
-              -e KSU_MANUAL_HOOK_AUTO_SETUID_HOOK \
-              -e KSU_MANUAL_HOOK_AUTO_INITRC_HOOK
+              -e KSU_MULTI_MANAGER_SUPPORT
 
-          # =====================================================================
           # 3. 刷新并锁定依赖
-          # =====================================================================
           echo "Syncing configs via silentoldconfig..."
           make O=out ARCH=arm64 silentoldconfig
 
