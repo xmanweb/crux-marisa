@@ -7,7 +7,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      FINAL_ZIP_NAME: ""
+      FINAL_ZIP_NAME: "" # 提前声明全局变量，彻底消除 GitHub 静态检查器警告
     steps:
       - name: Checkout Kernel Source
         uses: actions/checkout@v4
@@ -70,7 +70,7 @@ jobs:
           fi
 
           # =====================================================================
-          # 安全修复：将多行注入压缩为单行，彻底杜绝 Shell 换行符歧义
+          # 安全修复：将多行注入压缩为单行，彻底杜绝 Shell 换行符转义歧义
           # =====================================================================
           echo "Compensating SUSFS failed hunks securely..."
 
@@ -154,29 +154,37 @@ jobs:
             sed -i 's/kuid_t kruid, keuid, ksuid;/#ifdef CONFIG_KSU_MANUAL_HOOK\n\t(void)ksu_handle_setresuid(ruid, euid, suid);\n#endif\n\tkuid_t kruid, keuid, ksuid;/g' kernel/sys.c
           fi
 
-          # 生成基础配置并完全激活全部核心参数
+          # =====================================================================
+          # 生成基础配置，并严格按照成功项目的写法进行变量对齐与单选项（Choice）切换
+          # =====================================================================
           make O=out ARCH=arm64 crux_defconfig
           
-          echo "Injecting explicit config definitions via scripts/config..."
+          echo "Injecting explicit config definitions via standard scripts/config..."
+          
+          # 【完美融合】关闭传统内置KSU(Kprobes方式)，全力激活 ReSukiSU(手动方式) 与 2.1 顶级隐藏
           ./scripts/config --file out/.config \
               -d KSU \
-              -e CONFIG_KSU_MANUAL_HOOK \
-              -e CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK \
-              -e CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK \
-              -e CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK \
+              -e KSU_MANUAL_HOOK \
+              -e KSU_MANUAL_HOOK_AUTO_INPUT_HOOK \
+              -e KSU_MANUAL_HOOK_AUTO_SETUID_HOOK \
+              -e KSU_MANUAL_HOOK_AUTO_INITRC_HOOK \
               -e THREAD_INFO_IN_TASK \
               -e KSU_MULTI_MANAGER_SUPPORT \
-              -e CONFIG_SUSFS \
-              -e CONFIG_SUSFS_SUS_PATH \
-              -e CONFIG_SUSFS_SUS_MOUNT \
-              -e CONFIG_SUSFS_TRY_UMOUNT \
-              -e CONFIG_SUSFS_AUTO_ADD_SUS_MOUNT \
-              -e CONFIG_SUSFS_AUTO_ADD_SUS_PATH \
-              -e CONFIG_KSU_SUSFS \
-              -e CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT
+              -e SUSFS \
+              -e SUSFS_SUS_PATH \
+              -e SUSFS_SUS_MOUNT \
+              -e SUSFS_TRY_UMOUNT \
+              -e SUSFS_AUTO_ADD_SUS_MOUNT \
+              -e SUSFS_AUTO_ADD_SUS_PATH \
+              -e KSU_SUSFS \
+              -e KSU_SUSFS_HAS_MAGIC_MOUNT
 
-          # 正式编译
-          echo "Starting make process with full ReSukiSU Manual Hooks & SUSFS 2.1..."
+          # 调用内核原生配置刷新器，锁定合法依赖，确保配置真正落地
+          echo "Syncing configs via silentoldconfig..."
+          make O=out ARCH=arm64 silentoldconfig
+
+          # 正式执行内核压制
+          echo "Starting make process with verified ReSukiSU Manual Hooks & SUSFS 2.1..."
           make -j$(nproc --all) \
                       ARCH=arm64 \
                       SUBARCH=arm64 \
@@ -200,7 +208,7 @@ jobs:
           if [ -f "out/arch/arm64/boot/Image.gz-dtb" ]; then
             echo "Kernel compiled successfully! Preparing AnyKernel3..."
             
-            # 动态获取当前北京时间和短 Commit 号
+            # 获取北京时间与短提交号
             BUILD_DATE=$(date -d "+8 hours" +%Y%m%d_%H%M)
             SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
             ZIP_NAME="crux-kernel-resukisu-susfs-${BUILD_DATE}-${SHORT_SHA}.zip"
@@ -210,7 +218,7 @@ jobs:
             git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
             rm -rf AnyKernel3/.git AnyKernel3/README.md AnyKernel3/Image* AnyKernel3/zImage*
             
-            # 写入 anykernel.sh（完全移除了半角括号，使用单引号安全保护）
+            # 写入 anykernel.sh (无半角括号干扰，采用单引号强保护)
             echo '# AnyKernel3 Ramdisk Mod Script' > AnyKernel3/anykernel.sh
             echo '# osm0sis @ xda-developers' >> AnyKernel3/anykernel.sh
             echo '' >> AnyKernel3/anykernel.sh
