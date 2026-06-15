@@ -105,18 +105,20 @@ jobs:
           export PATH=$REAL_CLANG_PATH:$PATH
 
           # =====================================================================
-          # 【像素级据实修复】采用 Base64 零转义干扰技术还原纯净、标准的 input.c 补丁
+          # 【据实修复】针对 crux test 分支源码结构设计的像素级精准注入
           # =====================================================================
-          echo "Restoring official standard manual hook patch for drivers/input/input.c using Base64..."
+          echo "Injecting pure native ReSukiSU manual hooks into drivers/input/input.c..."
           
-          # 密文解码后 100% 还原带标准 Tab 的官方规格注入块，确保静态检查绝对绿灯通过
-          printf '%s' "LS0tIGEvZHJpdmVycy9pbnB1dC9pbnB1dC5jCisrKyBiL2RyaXZlcnMvaW5wdXQvaW5wdXQuYwpAQCAtMzU3LDExICszNTcsMjAgQEAKICAqIHRvICdzZWVkJyBpbml0aWFsIHN0YXRlIG9mIGEgc3dpdGNoIG9yIGluaXRpYWwgcG9zaXRpb24gb2YgYWJzb2x1dGUKICAqIGF4aXMsIGV0Yy4KICAqLworI2lmZGVmIENPTkZJR19LU1VfTUFOVUFMX0hPT0sKK2V4dGVybiBib29sIGtzdV9pbnB1dF9ob29rIF9fcmVhZF9tb3N0bHk7CitleHRlcm4gaW50IGtzdV9oYW5kbGVfaW5wdXRfaGFuZGxlX2V2ZW50KHVuc2lnbmVkIGludCAqdHlwZSwgdW5zaWduZWQgaW50ICpjb2RlLCBpbnQgKnZhbHVlKTsKKyNlbmRpZgorCiB2b2lkIGlucHV0X2V2ZW50KHN0cnVjdCBpbnB1dF9kZXYgKmRldiwKIAkJIHVuc2lnbmVkIGludCB0eXBlLCB1bnNpZ25lZCBpbnQgY29kZSwgaW50IHZhbHVlKQogewogCW9uc2lnbmVkIGxvbmcgZmxhZ3M7CiAKKyNpZmRlZiBDT05GSUdfS1NVX01BTlVBTF9IT09LCisJaWYgKHVubGlrZWx5KGtzdV9pbnB1dF9ob29rKSkKKwkJa3N1X2hhbmRsZV9pbnB1dF9oYW5kbGVfZXZlbnQoJnR5cGUsICZjb2RlLCAmdmFsdWUpOworI2VuZGlmCisKIAlpZiAoaXNfZXZlbnRfc3VwcG9ydGVkKHR5cGUsIGRldi0+ZXZiaXQsIEVWX01BWCkpIHs=" | base64 -d > input_hook.patch
-
-          # 执行物理修改应用，0 fuzz 完美就位
-          patch -p1 < input_hook.patch
+          if [ -f "drivers/input/input.c" ]; then
+            # 1. 完美避开多行参数干扰，直接在唯一的函数声明起始行上方注入外部声明结构
+            sed -i '/void input_event(struct input_dev \*dev,/i #ifdef CONFIG_KSU_MANUAL_HOOK\nextern bool ksu_input_hook __read_mostly;\nextern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);\n#endif' drivers/input/input.c
+            
+            # 2. 在全局唯一的局部变量声明 unsigned long flags; 下方，精准释放带物理 Tab 的拦截逻辑
+            sed -i '/unsigned long flags;/a \\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tif (unlikely(ksu_input_hook))\n\t\tksu_handle_input_handle_event(&type, &code, &value);\n#endif' drivers/input/input.c
+          fi
 
           # =====================================================================
-          # 其余核心原生挂钩注入（严格遵循官方机制，不触发任何绕过逻辑）
+          # 其余核心原生挂钩注入（严格遵循官方 Inline 检测机制，维持全绿通过状态）
           # =====================================================================
           echo "Injecting remaining native ReSukiSU inline hooks into kernel core..."
           
@@ -154,7 +156,7 @@ jobs:
           # 生成原本的基础默认配置
           make O=out ARCH=arm64 crux_defconfig
           
-          # 完全采用纯净配置，让核心 Hook 机制由系统的全局状态托管
+          # 显式激活编译配置项，保证底层调用逻辑编译进内核
           echo "Injecting explicit config definitions using provided configuration..."
           ./scripts/config --file out/.config \
               -e KSU \
