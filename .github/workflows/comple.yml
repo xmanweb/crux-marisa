@@ -105,46 +105,69 @@ jobs:
           export PATH=$REAL_CLANG_PATH:$PATH
 
           # =====================================================================
-          # 【精准原生挂钩注入】覆盖全部核心模块（含 sys_reboot 和 input_event）
+          # 【单行 echo 实现】构建格式绝对纯净的标准补丁文件，规避 YAML 缩进陷阱
           # =====================================================================
-          echo "Injecting native ReSukiSU inline hooks into kernel core..."
+          echo "Generating pixel-perfect manual hook patch using single-line echo..."
+          
+          echo "--- a/drivers/input/input.c" > input_hook.patch
+          echo "+++ b/drivers/input/input.c" >> input_hook.patch
+          echo "@@ -436,11 +436,22 @@" >> input_hook.patch
+          echo "  * to 'seed' initial state of a switch or initial position of absolute" >> input_hook.patch
+          echo "  * axis, etc." >> input_hook.patch
+          echo "  */" >> input_hook.patch
+          echo "+#ifdef CONFIG_KSU_MANUAL_HOOK" >> input_hook.patch
+          echo "+extern bool ksu_input_hook __read_mostly;" >> input_hook.patch
+          echo "+extern __attribute__((cold)) int ksu_handle_input_handle_event(" >> input_hook.patch
+          echo "+			unsigned int *type, unsigned int *code, int *value);" >> input_hook.patch
+          echo "+#endif" >> input_hook.patch
+          echo "+" >> input_hook.patch
+          echo " void input_event(struct input_dev *dev," >> input_hook.patch
+          echo " 		 unsigned int type, unsigned int code, int value)" >> input_hook.patch
+          echo " {" >> input_hook.patch
+          echo " 	unsigned long flags;" >> input_hook.patch
+          echo " " >> input_hook.patch
+          echo "+#ifdef CONFIG_KSU_MANUAL_HOOK" >> input_hook.patch
+          echo "+	if (unlikely(ksu_input_hook))" >> input_hook.patch
+          echo "+		ksu_handle_input_handle_event(&type, &code, &value);" >> input_hook.patch
+          echo "+#endif" >> input_hook.patch
+          echo "+" >> input_hook.patch
+          echo " 	if (is_event_supported(type, dev->evbit, EV_MAX)) {" >> input_hook.patch
+
+          # 调用标准 patch 构建物理修改，完全不破坏任何验证机制
+          patch -p1 < input_hook.patch
+
+          # =====================================================================
+          # 其余核心原生挂钩注入（sys_reboot 移至 kernel/reboot.c）
+          # =====================================================================
+          echo "Injecting remaining native ReSukiSU inline hooks into kernel core..."
           
           # 1. 挂钩 kernel/sys.c (处理 setresuid)
           if [ -f "kernel/sys.c" ]; then
             sed -i '/kuid_t kruid, keuid, ksuid;/i \	extern int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);\n\tksu_handle_setresuid(ruid, euid, suid);' kernel/sys.c
           fi
 
-          # 2. 挂钩 kernel/reboot.c (处理 sys_reboot)
+          # 2. 挂钩 kernel/reboot.c (据实修复真正的 sys_reboot)
           if [ -f "kernel/reboot.c" ]; then
             sed -i '/SYSCALL_DEFINE4(reboot/i extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user *arg);' kernel/reboot.c
             sed -i '/struct pid_namespace \*pid_ns = task_active_pid_ns(current);/i \	ksu_handle_sys_reboot(magic1, magic2, cmd, arg);' kernel/reboot.c
           fi
 
-          # 3. 挂钩 drivers/input/input.c (根据 ReSukiSU 文档修复手动 input 钩子)
-          if [ -f "drivers/input/input.c" ]; then
-            # 在 input_event 之前前置声明函数原型
-            sed -i '/void input_event(struct input_dev \*dev/i extern bool ksu_input_hook __read_mostly;\nextern __attribute__((cold)) int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);' drivers/input/input.c
-            
-            # 在进入 input_event 的条件判断前，精准插入拦截逻辑
-            sed -i '/if (is_event_supported(type, dev->evbit, EV_MAX)) {/i \	if (unlikely(ksu_input_hook))\n\t\tksu_handle_input_handle_event(&type, &code, &value);' drivers/input/input.c
-          fi
-
-          # 4. fs/open.c (处理 faccessat)
+          # 3. fs/open.c (处理 faccessat)
           if [ -f "fs/open.c" ]; then
             sed -i '/if (mode & ~S_IRWXO)/i \	extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n\tksu_handle_faccessat(&dfd, &filename, (int *)&mode, NULL);' fs/open.c
           fi
 
-          # 5. fs/exec.c (处理 execveat)
+          # 4. fs/exec.c (处理 execveat)
           if [ -f "fs/exec.c" ]; then
             sed -i '/retval = bprm_mm_init(bprm);/i \	extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);' fs/exec.c
           fi
 
-          # 6. fs/stat.c (处理 stat)
+          # 5. fs/stat.c (处理 stat)
           if [ -f "fs/stat.c" ]; then
             sed -i '/struct path path;/a \	extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\n\tksu_handle_stat(&dfd, &filename, &flag);' fs/stat.c
           fi
 
-          # 7. fs/read_write.c (处理 sys_read)
+          # 6. fs/read_write.c (处理 sys_read)
           if [ -f "fs/read_write.c" ]; then
             sed -i '/ssize_t vfs_read(struct file \*file, char __user \*buf, size_t count, loff_t \*pos)/a \	extern int ksu_handle_sys_read(struct file **file_ptr, char __user **buf_ptr, size_t *count_ptr, loff_t **pos_ptr);\n\tksu_handle_sys_read(&file, (char __user **)&buf, &count, &pos);' fs/read_write.c
           fi
