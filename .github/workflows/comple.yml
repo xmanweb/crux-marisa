@@ -24,6 +24,15 @@ jobs:
             libgmp3-dev libmpfr-dev libmpc-dev libcap-dev zlib1g-dev python3 \
             bison flex ccache libelf-dev lz4 liblz4-tool libstdc++6 openjdk-11-jdk zip unzip curl git
 
+      - name: Fetch ZyC-Clang 16 Toolchain
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/toolchain
+          cd $GITHUB_WORKSPACE/toolchain
+          echo "Downloading latest ZyC-Clang 16..."
+          curl -LO https://github.com/ZyCromerZ/Clang/releases/download/16.0.6-20260510-release/Clang-16.0.6-20260510.tar.gz
+          mkdir -p zyc-clang
+          tar -xzf Clang-16.0.6-20260510.tar.gz -C zyc-clang
+
       - name: Integrate Official ReSukiSU
         run: |
           cd $GITHUB_WORKSPACE
