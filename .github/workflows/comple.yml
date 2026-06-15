@@ -105,40 +105,40 @@ jobs:
           export PATH=$REAL_CLANG_PATH:$PATH
 
           # =====================================================================
-          # 【降维打击级原生挂钩注入】强力攻克 sys_reboot
+          # 【精准原生挂钩注入】定位 kernel/reboot.c 强力注入 sys_reboot
           # =====================================================================
           echo "Injecting native ReSukiSU inline hooks into kernel core..."
           
-          # 1. kernel/sys.c 注入
+          # 1. 挂钩 kernel/sys.c (处理 setresuid)
           if [ -f "kernel/sys.c" ]; then
-            # 注入 setresuid 钩子
             sed -i '/kuid_t kruid, keuid, ksuid;/i \	extern int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);\n\tksu_handle_setresuid(ruid, euid, suid);' kernel/sys.c
-            
-            # 【终极保险方案】直接在 kernel/sys.c 的绝对末尾追加一个强行调用
-            # 这样 inline_hook_check 脚本通过 grep 扫描文件时，必然会 100% 发现这个钩子符号
-            echo -e "\n/* ReSukiSU Forced Inline Hook Holder */\nvoid __used __resukisu_reboot_holder(void) {\n\textern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user *arg);\n\tksu_handle_sys_reboot(0, 0, 0, NULL);\n}" >> kernel/sys.c
-            
-            # 同时为了确保运行时也能跑到，我们在内核必经的 kernel_power_off() 第一行进行实际拦截注入
-            # kernel_power_off 的声明极度固定，不容易受宏展开影响
-            sed -i 's/void kernel_power_off(void)/void kernel_power_off(void)\n{\n\textern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user *arg);\n\tksu_handle_sys_reboot(0, 0, 0, NULL);/g' kernel/sys.c
           fi
 
-          # 2. fs/open.c (处理 faccessat)
+          # 2. 挂钩 kernel/reboot.c (精准击穿真正的 sys_reboot 系统调用)
+          if [ -f "kernel/reboot.c" ]; then
+            # 在 SYSCALL_DEFINE4(reboot... 上方插入外部函数声明
+            sed -i '/SYSCALL_DEFINE4(reboot/i extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user *arg);' kernel/reboot.c
+            
+            # 在进入系统调用逻辑后，提取参数前的第一步直接执行安全过滤拦截
+            sed -i '/struct pid_namespace \*pid_ns = task_active_pid_ns(current);/i \	ksu_handle_sys_reboot(magic1, magic2, cmd, arg);' kernel/reboot.c
+          fi
+
+          # 3. fs/open.c (处理 faccessat)
           if [ -f "fs/open.c" ]; then
             sed -i '/if (mode & ~S_IRWXO)/i \	extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n\tksu_handle_faccessat(&dfd, &filename, (int *)&mode, NULL);' fs/open.c
           fi
 
-          # 3. fs/exec.c (处理 execveat)
+          # 4. fs/exec.c (处理 execveat)
           if [ -f "fs/exec.c" ]; then
             sed -i '/retval = bprm_mm_init(bprm);/i \	extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);' fs/exec.c
           fi
 
-          # 4. fs/stat.c (处理 stat)
+          # 5. fs/stat.c (处理 stat)
           if [ -f "fs/stat.c" ]; then
             sed -i '/struct path path;/a \	extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\n\tksu_handle_stat(&dfd, &filename, &flag);' fs/stat.c
           fi
 
-          # 5. fs/read_write.c (处理 sys_read)
+          # 6. fs/read_write.c (处理 sys_read)
           if [ -f "fs/read_write.c" ]; then
             sed -i '/ssize_t vfs_read(struct file \*file, char __user \*buf, size_t count, loff_t \*pos)/a \	extern int ksu_handle_sys_read(struct file **file_ptr, char __user **buf_ptr, size_t *count_ptr, loff_t **pos_ptr);\n\tksu_handle_sys_read(&file, (char __user **)&buf, &count, &pos);' fs/read_write.c
           fi
