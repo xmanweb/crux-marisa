@@ -199,7 +199,7 @@ jobs:
           # 生成 crux 默认配置
           make O=out ARCH=arm64 crux_defconfig
           
-          # 激活编译配置项 (-e BUILD_ARM64_DT_OVERLAY)
+          # 激活编译配置项
           ./scripts/config --file out/.config \
               -e KSU \
               -e THREAD_INFO_IN_TASK \
@@ -259,7 +259,7 @@ jobs:
           rm -rf ak3_no_dtb/.git ak3_no_dtb/README.md ak3_no_dtb/Image* ak3_no_dtb/zImage*
           
           # =====================================================================
-          # 定义动态 anykernel.sh 说明脚本流生成函数 (彻底修复大括号闭合错误)
+          # 定义动态 anykernel.sh 说明脚本流生成函数 (彻底移除括号、补齐大括号)
           # =====================================================================
           define_properties() {
             local target_script="$1"
@@ -267,7 +267,8 @@ jobs:
             
             echo '# AnyKernel3 Ramdisk Mod Script' > "$target_script"
             echo 'properties() { ' >> "$target_script"
-            echo "kernel.string=Mi9Pro crux ReSukiSU SUSFS (${track_mode}) - ${BUILD_DATE}" >> "$target_script"
+            # 【核心修正】：用连字符代替任何形式的括号，确保 TWRP 100% 顺畅解析
+            echo "kernel.string=Mi9Pro crux ReSukiSU SUSFS - ${track_mode} - ${BUILD_DATE}" >> "$target_script"
             echo 'do.devicecheck=1; do.modules=0; do.systemless=1; do.cleanup=1; do.cleanuponabort=1;' >> "$target_script"
             echo "device.name1=crux" >> "$target_script"
             echo '} ' >> "$target_script"
@@ -277,7 +278,6 @@ jobs:
             echo 'flash_boot;' >> "$target_script"
             
             if [ "$track_mode" = "With-DTB" ]; then
-              # 如果编译没产出 dtbo.img，这里多加个保护判断，防止 AnyKernel3 执行报错
               if [ -f "out/arch/arm64/boot/dtbo.img" ]; then
                 echo 'flash_dtbo;' >> "$target_script"
               else
@@ -286,7 +286,7 @@ jobs:
             else
               echo '# flash_dtbo;' >> "$target_script"
             fi
-          } # <--- 这里之前漏掉了闭合函数，现在已完美补上！
+          }
           
           define_properties "ak3_with_dtb/anykernel.sh" "With-DTB"
           define_properties "ak3_no_dtb/anykernel.sh" "No-DTB"
