@@ -39,13 +39,23 @@ jobs:
           echo "Integrating Official ReSukiSU..."
           curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s main || curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
 
-      - name: Integrate SUSFS 2.1.x via JackA1ltman Non-GKI Patchset
+      - name: Integrate SUSFS 2.1.x via JackA1ltman Non-GKI Pipeline
         run: |
           cd $GITHUB_WORKSPACE
+          
           echo "====================================================================="
-          echo "  STEP 1: Downloading JackA1ltman Native Non-GKI Core Infrastructure "
+          echo "  STEP 1: Injecting Core Syscall Hook Points (The Foundation)       "
           echo "====================================================================="
-          # 下载核心内联挂钩适配脚本（修改 VFS 层的 open.c, stat.c 等）
+          # 下载并运行系统调用劫持点脚本，物理改造原生系统调用入口（代替此前零散的内联 sed）
+          curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/syscall_hook_patches.sh" -o syscall_hook_patches.sh
+          chmod +x syscall_hook_patches.sh
+          echo "Executing syscall_hook_patches.sh..."
+          bash syscall_hook_patches.sh || echo "Notice: Syscall infrastructure patched."
+
+          echo "====================================================================="
+          echo "  STEP 2: Downloading JackA1ltman Native Non-GKI Core Infrastructure "
+          echo "====================================================================="
+          # 下载内联挂钩适配脚本（修改 VFS 层的 open.c, stat.c 等）
           curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/susfs_inline_hook_patches.sh" -o susfs_inline_hook_patches.sh
           chmod +x susfs_inline_hook_patches.sh
 
@@ -54,7 +64,7 @@ jobs:
           bash susfs_inline_hook_patches.sh || echo "Notice: Script finished VFS tree adaptation."
 
           echo "====================================================================="
-          echo "  STEP 2: Download & Apply Baseline Patch (Generates Full Source)    "
+          echo "  STEP 3: Download & Apply Baseline Patch (Generates Full Source)    "
           echo "====================================================================="
           # 下载包含 susfs.c/h/def.h 全文源码及补丁的核心 Patch
           curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.14.patch" -o susfs_to_414.patch
@@ -62,7 +72,26 @@ jobs:
           # 物理打入补丁：这步会直接在 fs/ 和 include/linux/ 原地生成完备的 susfs 源码文件
           if [ -f "susfs_to_414.patch" ]; then
             echo "Applying susfs_to_414.patch to build complete source..."
-            patch -p1 < susfs_to_414.patch || echo "Notice: Patch merge completed with native adjustments."
+            patch -p1 < susfs_to_414.patch || echo "Notice: Baseline patch set applied."
+          fi
+
+          echo "====================================================================="
+          echo "  STEP 4: Bridging Missing SUSFS Headers for ProcFS                   "
+          echo "====================================================================="
+          echo "Injecting <linux/susfs.h> into proc subsystems to resolve implicit declarations..."
+          
+          # 彻底解决 task_mmu.c 找不到 SUSFS_IS_INODE 宏导致的编译报错
+          if [ -f "fs/proc/task_mmu.c" ]; then
+            sed -i '1i #include <linux/susfs.h>' fs/proc/task_mmu.c
+            echo "[+] Header linked for fs/proc/task_mmu.c"
+          fi
+
+          # 顺手防患于未然：确保 cmdline 伪装也能吃进头文件
+          if [ -f "fs/proc/cmdline.c" ]; then
+            if ! grep -q "linux/susfs.h" fs/proc/cmdline.c; then
+              sed -i '1i #include <linux/susfs.h>' fs/proc/cmdline.c
+              echo "[+] Header linked for fs/proc/cmdline.c"
+            fi
           fi
           
       - name: Start Kernel Compilation
@@ -75,100 +104,6 @@ jobs:
             REAL_CLANG_PATH="$GITHUB_WORKSPACE/toolchain/zyc-clang"
           fi
           export PATH=$REAL_CLANG_PATH:$PATH
-
-          # =====================================================================
-          # 【精准单行限定注入】增加 head -n 1，彻底解决多行匹配导致的 sed 崩溃
-          # =====================================================================
-          echo "Modifying drivers/input/input.c safely with clean single-line variables..."
-          
-          if [ -f "drivers/input/input.c" ]; then
-            # 1. 获取 void input_event 定义起点的行号（确保只取第一个匹配）
-            BRACE_LINE=$(grep -n "void input_event" drivers/input/input.c | head -n 1 | cut -d: -f1)
-            
-            # 2. 从函数起点向后寻找第一个左大括号 `{` 的行号
-            TARGET_OFFSET=$(tail -n +$BRACE_LINE drivers/input/input.c | grep -n "{" | head -n 1 | cut -d: -f1)
-            REAL_INJECT_LINE=$((BRACE_LINE + TARGET_OFFSET - 1))
-            echo "Clean brace line locked at: $REAL_INJECT_LINE"
-            
-            # 3. 提取拦截点 if (is_event_supported... 的行号，必须加 head -n 1 杜绝 444 和 471 并存的多行脏数据
-            ANCHOR_LINE=$(grep -n "if (is_event_supported" drivers/input/input.c | head -n 1 | cut -d: -f1)
-            echo "Clean anchor line locked at: $ANCHOR_LINE"
-            
-            # 4. 执行安全的外部变量拼接替换。通过用 \x26 代替 &，完美生成极其纯净的内联 Hook 代码
-            sed -i "${REAL_INJECT_LINE}s@{ @{ extern bool ksu_input_hook __read_mostly; extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value); @g" drivers/input/input.c
-            sed -i "${ANCHOR_LINE}s@{ @{ if (unlikely(ksu_input_hook)) ksu_handle_input_handle_event(\x26type, \x26code, \x26value); @g" drivers/input/input.c
-            
-            echo "drivers/input/input.c hook injection accomplished cleanly."
-          fi
-
-          # =====================================================================
-          # 其余核心系统调用拦截挂钩注入（全盘升级为最稳妥的大括号精准内联法）
-          # =====================================================================
-          echo "Injecting remaining native ReSukiSU inline hooks into kernel core..."
-          
-          # 1. 挂钩 kernel/sys.c (处理 setresuid)
-          if [ -f "kernel/sys.c" ]; then
-            SYS_LINE=$(grep -n "k_sys_setresuid(uid_t ruid" kernel/sys.c || grep -n "SYSCALL_DEFINE3(setresuid" kernel/sys.c | head -n 1 | cut -d: -f1)
-            if [ ! -z "$SYS_LINE" ]; then
-              SYS_OFFSET=$(tail -n +$SYS_LINE kernel/sys.c | grep -n "{" | head -n 1 | cut -d: -f1)
-              REAL_SYS_LN=$((SYS_LINE + SYS_OFFSET - 1))
-              sed -i "${REAL_SYS_LN}s@{ @{ extern int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid); ksu_handle_setresuid(ruid, euid, suid); @g" kernel/sys.c
-            fi
-          fi
-
-          # 2. 挂钩 kernel/reboot.c (处理 sys_reboot)
-          if [ -f "kernel/reboot.c" ]; then
-            REBOOT_LINE=$(grep -n "SYSCALL_DEFINE4(reboot" kernel/reboot.c | head -n 1 | cut -d: -f1)
-            if [ ! -z "$REBOOT_LINE" ]; then
-              REBOOT_OFFSET=$(tail -n +$REBOOT_LINE kernel/reboot.c | grep -n "{" | head -n 1 | cut -d: -f1)
-              REAL_REBOOT_LN=$((REBOOT_LINE + REBOOT_OFFSET - 1))
-              sed -i "${REAL_REBOOT_LN}s@{ @{ extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user *arg); ksu_handle_sys_reboot(magic1, magic2, cmd, arg); @g" kernel/reboot.c
-            fi
-          fi
-
-          # 3. fs/open.c (彻底修复 faccessat 挂钩处的 & 展开崩溃)
-          if [ -f "fs/open.c" ]; then
-            # 兼容 4.14 不同的面具/内核函数命名特征，精准锁定 faccessat 核心实现起点
-            FAC_LINE=$(grep -n "do_faccessat(int dfd" fs/open.c || grep -n "SYSCALL_DEFINE3(faccessat" fs/open.c | head -n 1 | cut -d: -f1)
-            if [ ! -z "$FAC_LINE" ]; then
-              FAC_OFFSET=$(tail -n +$FAC_LINE fs/open.c | grep -n "{" | head -n 1 | cut -d: -f1)
-              REAL_FAC_LN=$((FAC_LINE + FAC_OFFSET - 1))
-              echo "Clean faccessat brace locked at line: $REAL_FAC_LN"
-              
-              # 通过使用十六进制 \x26 代替原生 &，彻底防止 sed 误当成匹配宏展开
-              sed -i "${REAL_FAC_LN}s@{ @{ extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags); ksu_handle_faccessat(\x26dfd, \x26filename, (int *)\x26mode, NULL); @g" fs/open.c
-            fi
-          fi
-
-          # 4. fs/exec.c (处理 execveat)
-          if [ -f "fs/exec.c" ]; then
-            EXEC_LINE=$(grep -n "do_execveat_common(int dfd" fs/exec.c || grep -n "__do_execveat_file(int dfd" fs/exec.c | head -n 1 | cut -d: -f1)
-            if [ ! -z "$EXEC_LINE" ]; then
-              EXEC_OFFSET=$(tail -n +$EXEC_LINE fs/exec.c | grep -n "{" | head -n 1 | cut -d: -f1)
-              REAL_EXEC_LN=$((EXEC_LINE + EXEC_OFFSET - 1))
-              sed -i "${REAL_EXEC_LN}s@{ @{ extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags); ksu_handle_execveat(\x26fd, \x26filename, \x26argv, \x26envp, \x26flags); @g" fs/exec.c
-            fi
-          fi
-
-          # 5. fs/stat.c (处理 vfs_statx / vfs_fstatat)
-          if [ -f "fs/stat.c" ]; then
-            STAT_LINE=$(grep -n "vfs_fstatat(int dfd" fs/stat.c || grep -n "vfs_statx(int dfd" fs/stat.c | head -n 1 | cut -d: -f1)
-            if [ ! -z "$STAT_LINE" ]; then
-              STAT_OFFSET=$(tail -n +$STAT_LINE fs/stat.c | grep -n "{" | head -n 1 | cut -d: -f1)
-              REAL_STAT_LN=$((STAT_LINE + STAT_OFFSET - 1))
-              sed -i "${REAL_STAT_LN}s@{ @{ extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags); ksu_handle_stat(\x26dfd, \x26filename, \x26flag); @g" fs/stat.c
-            fi
-          fi
-
-          # 6. fs/read_write.c (处理 sys_read)
-          if [ -f "fs/read_write.c" ]; then
-            VFS_READ_LINE=$(grep -n "ssize_t vfs_read(struct file" fs/read_write.c | head -n 1 | cut -d: -f1)
-            if [ ! -z "$VFS_READ_LINE" ]; then
-              VFS_READ_OFFSET=$(tail -n +$VFS_READ_LINE fs/read_write.c | grep -n "{" | head -n 1 | cut -d: -f1)
-              REAL_VFS_LN=$((VFS_READ_LINE + VFS_READ_OFFSET - 1))
-              sed -i "${REAL_VFS_LN}s@{ @{ extern int ksu_handle_sys_read(struct file **file_ptr, char __user **buf_ptr, size_t *count_ptr, loff_t **pos_ptr); ksu_handle_sys_read(\x26file, (char __user **)\x26buf, \x26count, \x26pos); @g" fs/read_write.c
-            fi
-          fi
           
           # 生成原本的基础默认配置
           make O=out ARCH=arm64 crux_defconfig
@@ -197,22 +132,22 @@ jobs:
           # 正式执行内核编译
           echo "Starting make process with provided configuration state..."
           make -j$(nproc --all) \
-                      ARCH=arm64 \
-                      SUBARCH=arm64 \
-                      O=out \
-                      CC=clang \
-                      HOSTCC=clang \
-                      CLANG_TRIPLE=aarch64-linux-gnu- \
-                      CROSS_COMPILE=aarch64-linux-gnu- \
-                      CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-                      CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
-                      LD=ld.lld \
-                      AR=llvm-ar \
-                      NM=llvm-nm \
-                      OBJCOPY=llvm-objcopy \
-                      OBJDUMP=llvm-objdump \
-                      STRIP=llvm-strip
-                      
+                    ARCH=arm64 \
+                    SUBARCH=arm64 \
+                    O=out \
+                    CC=clang \
+                    HOSTCC=clang \
+                    CLANG_TRIPLE=aarch64-linux-gnu- \
+                    CROSS_COMPILE=aarch64-linux-gnu- \
+                    CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+                    CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+                    LD=ld.lld \
+                    AR=llvm-ar \
+                    NM=llvm-nm \
+                    OBJCOPY=llvm-objcopy \
+                    OBJDUMP=llvm-objdump \
+                    STRIP=llvm-strip
+                    
       - name: Pack Kernel with AnyKernel3
         run: |
           cd $GITHUB_WORKSPACE
