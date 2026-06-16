@@ -11,6 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       FINAL_ZIP_NAME: ""
+      NO_DTB_ZIP_NAME: ""
     steps:
       - name: Checkout Kernel Source
         uses: actions/checkout@v4
@@ -97,13 +98,11 @@ jobs:
             sed -i '/mnt_group_start = mnt->mnt_group_id + 1;/i #endif\nbypass_orig_flow:' fs/namespace.c
           fi
 
-          # 【修复 3】补救 fs/proc/cmdline.c ——【已修复行号带连字符导致的 sed 报错】
+          # 【修复 3】补救 fs/proc/cmdline.c
           if [ -f "fs/proc/cmdline.c" ]; then
             echo "Manually injecting failed SUSFS code into fs/proc/cmdline.c..."
-            # 1. 注入顶部声明
             sed -i '/static int cmdline_proc_show/i #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\nextern struct static_key_false susfs_is_fake_cmdline_or_bootconfig_buffer_set;\nextern void susfs_spoof_cmdline_or_bootconfig(struct seq_file *m);\n#endif' fs/proc/cmdline.c
             
-            # 2. 纯安全 awk 过滤：寻找函数名后下方的第一个左大括号，彻底过滤非数字字符
             CMDLINE_LN=$(awk '/static int cmdline_proc_show/,/{/{if($0 ~ /{/){print NR; exit}}' fs/proc/cmdline.c)
             if [ ! -z "$CMDLINE_LN" ]; then
               echo "Pure clean line number locked at: $CMDLINE_LN"
@@ -111,7 +110,7 @@ jobs:
             fi
           fi
 
-          # 【修复 4】全面抢救 fs/proc/task_mmu.c 中脱靶的 show_smap 与头文件引用
+          # 【修复 4】全面抢救 fs/proc/task_mmu.c
           if [ -f "fs/proc/task_mmu.c" ]; then
             echo "Manually injecting failed SUSFS code into fs/proc/task_mmu.c..."
             sed -i '/#include <linux\/uaccess.h>/i #if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)\n#include <linux/susfs.h>\n#endif' fs/proc/task_mmu.c
@@ -121,7 +120,7 @@ jobs:
           fi
 
           # =====================================================================
-          # 既有正常逻辑：老哥你自己的 Precision Hook 注入
+          # 既有正常逻辑：Precision Hook 注入
           # =====================================================================
           echo "Modifying drivers/input/input.c safely with clean single-line variables..."
           if [ -f "drivers/input/input.c" ]; then
@@ -133,12 +132,11 @@ jobs:
             
             sed -i "${REAL_INJECT_LINE}s@{ @{ extern bool ksu_input_hook __read_mostly; extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value); @g" drivers/input/input.c
             sed -i "${ANCHOR_LINE}s@{ @{ if (unlikely(ksu_input_hook)) ksu_handle_input_handle_event(\x26type, \x26code, \x26value); @g" drivers/input/input.c
-            echo "drivers/input/input.c hook injection accomplished cleanly."
           fi
 
           echo "Injecting remaining native ReSukiSU inline hooks into kernel core..."
           
-          # 1. 挂钩 kernel/sys.c (处理 setresuid)
+          # 1. 挂钩 kernel/sys.c
           if [ -f "kernel/sys.c" ]; then
             SYS_LINE=$(grep -n "k_sys_setresuid(uid_t ruid" kernel/sys.c || grep -n "SYSCALL_DEFINE3(setresuid" kernel/sys.c | head -n 1 | cut -d: -f1)
             if [ ! -z "$SYS_LINE" ]; then
@@ -148,7 +146,7 @@ jobs:
             fi
           fi
 
-          # 2. 挂钩 kernel/reboot.c (处理 sys_reboot)
+          # 2. 挂钩 kernel/reboot.c
           if [ -f "kernel/reboot.c" ]; then
             REBOOT_LINE=$(grep -n "SYSCALL_DEFINE4(reboot" kernel/reboot.c | head -n 1 | cut -d: -f1)
             if [ ! -z "$REBOOT_LINE" ]; then
@@ -168,7 +166,7 @@ jobs:
             fi
           fi
 
-          # 4. fs/exec.c (处理 execveat)
+          # 4. fs/exec.c
           if [ -f "fs/exec.c" ]; then
             EXEC_LINE=$(grep -n "do_execveat_common(int dfd" fs/exec.c || grep -n "__do_execveat_file(int dfd" fs/exec.c | head -n 1 | cut -d: -f1)
             if [ ! -z "$EXEC_LINE" ]; then
@@ -178,7 +176,7 @@ jobs:
             fi
           fi
 
-          # 5. fs/stat.c (处理 vfs_statx / vfs_fstatat)
+          # 5. fs/stat.c
           if [ -f "fs/stat.c" ]; then
             STAT_LINE=$(grep -n "vfs_fstatat(int dfd" fs/stat.c || grep -n "vfs_statx(int dfd" fs/stat.c | head -n 1 | cut -d: -f1)
             if [ ! -z "$STAT_LINE" ]; then
@@ -188,7 +186,7 @@ jobs:
             fi
           fi
 
-          # 6. fs/read_write.c (处理 sys_read)
+          # 6. fs/read_write.c
           if [ -f "fs/read_write.c" ]; then
             VFS_READ_LINE=$(grep -n "ssize_t vfs_read(struct file" fs/read_write.c | head -n 1 | cut -d: -f1)
             if [ ! -z "$VFS_READ_LINE" ]; then
@@ -198,11 +196,10 @@ jobs:
             fi
           fi
           
-          # 生成原本的基础默认配置
+          # 生成默认配置
           make O=out ARCH=arm64 crux_defconfig
           
-          # 显式激活编译配置项
-          echo "Injecting explicit config definitions using provided configuration..."
+          # 激活编译配置项
           ./scripts/config --file out/.config \
               -e KSU \
               -e THREAD_INFO_IN_TASK \
@@ -218,12 +215,9 @@ jobs:
               -e KSU_SUSFS_SUS_MAP \
               -e KSU_MULTI_MANAGER_SUPPORT
 
-          # 刷新并锁定依赖
-          echo "Syncing configs via silentoldconfig..."
           make O=out ARCH=arm64 silentoldconfig
 
           # 正式执行内核编译
-          echo "Starting make process with provided configuration state..."
           make -j$(nproc --all) \
                       ARCH=arm64 \
                       SUBARCH=arm64 \
@@ -241,69 +235,75 @@ jobs:
                       OBJDUMP=llvm-objdump \
                       STRIP=llvm-strip
                       
-      - name: Pack Kernel with AnyKernel3
+      - name: Pack Kernel with AnyKernel3 (Dual Output)
         run: |
           cd $GITHUB_WORKSPACE
           if [ -f "out/arch/arm64/boot/Image.gz-dtb" ]; then
-            echo "Kernel compiled successfully! Preparing AnyKernel3..."
+            echo "Kernel compiled successfully! Preparing AnyKernel3 Dual Pack..."
             
             BUILD_DATE=$(date -d "+8 hours" +%Y%m%d_%H%M)
             SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
-            ZIP_NAME="crux-kernel-resukisu-susfs-${BUILD_DATE}-${SHORT_SHA}.zip"
             
-            echo "FINAL_ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
+            ZIP_FULL="crux-kernel-resukisu-susfs-${BUILD_DATE}-${SHORT_SHA}-With-DTB.zip"
+            ZIP_NODTB="crux-kernel-resukisu-susfs-${BUILD_DATE}-${SHORT_SHA}-No-DTB.zip"
             
+            echo "FINAL_ZIP_NAME=${ZIP_FULL}" >> $GITHUB_ENV
+            echo "NO_DTB_ZIP_NAME=${ZIP_NODTB}" >> $GITHUB_ENV
+            
+            # 克隆 AnyKernel3 基准库
             git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
             rm -rf AnyKernel3/.git AnyKernel3/README.md AnyKernel3/Image* AnyKernel3/zImage*
-            
-            echo '# AnyKernel3 Ramdisk Mod Script' > AnyKernel3/anykernel.sh
-            echo '# osm0sis @ xda-developers' >> AnyKernel3/anykernel.sh
-            echo '' >> AnyKernel3/anykernel.sh
-            echo '## AnyKernel setup' >> AnyKernel3/anykernel.sh
-            echo '# begin properties' >> AnyKernel3/anykernel.sh
-            echo 'properties() { ' >> AnyKernel3/anykernel.sh
-            echo "kernel.string=Crux ReSukiSU SUSFS 2.1 - ${BUILD_DATE} - ${SHORT_SHA} - by xmanweb" >> AnyKernel3/anykernel.sh
-            echo 'do.devicecheck=1' >> AnyKernel3/anykernel.sh
-            echo 'do.modules=0' >> AnyKernel3/anykernel.sh
-            echo 'do.systemless=1' >> AnyKernel3/anykernel.sh
-            echo 'do.cleanup=1' >> AnyKernel3/anykernel.sh
-            echo 'do.cleanuponabort=1' >> AnyKernel3/anykernel.sh
-            echo "device.name1=crux" >> AnyKernel3/anykernel.sh
-            echo 'device.name2=' >> AnyKernel3/anykernel.sh
-            echo 'device.name3=' >> AnyKernel3/anykernel.sh
-            echo 'device.name4=' >> AnyKernel3/anykernel.sh
-            echo 'device.name5=' >> AnyKernel3/anykernel.sh
-            echo 'supported.versions=' >> AnyKernel3/anykernel.sh
-            echo 'supported.patchlevels=' >> AnyKernel3/anykernel.sh
-            echo '} # end properties' >> AnyKernel3/anykernel.sh
-            echo '' >> AnyKernel3/anykernel.sh
-            echo '## AnyKernel methods (do not change)' >> AnyKernel3/anykernel.sh
-            echo 'BLOCK=boot;' >> AnyKernel3/anykernel.sh
-            echo 'IS_SLOT_DEVICE=0;' >> AnyKernel3/anykernel.sh
-            echo 'RAMDISK_COMPRESSION=auto;' >> AnyKernel3/anykernel.sh
-            echo 'PATCH_VBMETA_FLAG=auto;' >> AnyKernel3/anykernel.sh
-            echo '' >> AnyKernel3/anykernel.sh
-            echo '. /tmp/anykernel/tools/ak3-core.sh;' >> AnyKernel3/anykernel.sh
-            echo '' >> AnyKernel3/anykernel.sh
-            echo '## AnyKernel install' >> AnyKernel3/anykernel.sh
-            echo 'split_boot;' >> AnyKernel3/anykernel.sh
-            echo 'flash_boot;' >> AnyKernel3/anykernel.sh
-            echo 'flash_dtbo;' >> AnyKernel3/anykernel.sh
-            echo '## end install' >> AnyKernel3/anykernel.sh
-            
             cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/Image.gz-dtb
             
+            # =====================================================================
+            # 1. 先生产第一份：【全量含 DTB 刷写包】
+            # =====================================================================
+            echo '# AnyKernel3 Ramdisk Mod Script' > AnyKernel3/anykernel.sh
+            echo 'properties() { ' >> AnyKernel3/anykernel.sh
+            echo "kernel.string=Crux ReSukiSU SUSFS (With DTB) - ${BUILD_DATE} - by xmanweb" >> AnyKernel3/anykernel.sh
+            echo 'do.devicecheck=1; do.modules=0; do.systemless=1; do.cleanup=1; do.cleanuponabort=1;' >> AnyKernel3/anykernel.sh
+            echo "device.name1=crux" >> AnyKernel3/anykernel.sh
+            echo '} ' >> AnyKernel3/anykernel.sh
+            echo 'BLOCK=boot; IS_SLOT_DEVICE=0; RAMDISK_COMPRESSION=auto; PATCH_VBMETA_FLAG=auto;' >> AnyKernel3/anykernel.sh
+            echo '. /tmp/anykernel/tools/ak3-core.sh;' >> AnyKernel3/anykernel.sh
+            echo 'split_boot;' >> AnyKernel3/anykernel.sh
+            echo 'flash_boot;' >> AnyKernel3/anykernel.sh
+            echo 'flash_dtbo;' >> AnyKernel3/anykernel.sh  # 保留全量包的 dtbo 刷写
+            
             cd AnyKernel3
-            zip -r ../${ZIP_NAME} *
+            zip -r ../${ZIP_FULL} *
             cd ..
-            echo "AnyKernel3 flashable zip created successfully: ${ZIP_NAME}"
+            echo "Successfully generated Full Pack: ${ZIP_FULL}"
+            
+            # =====================================================================
+            # 2. 修改配置生产第二份：【干净纯内核不刷写 DTB 包】
+            # =====================================================================
+            echo '# AnyKernel3 Ramdisk Mod Script' > AnyKernel3/anykernel.sh
+            echo 'properties() { ' >> AnyKernel3/anykernel.sh
+            echo "kernel.string=Crux ReSukiSU SUSFS (No DTB) - ${BUILD_DATE} - by xmanweb" >> AnyKernel3/anykernel.sh
+            echo 'do.devicecheck=1; do.modules=0; do.systemless=1; do.cleanup=1; do.cleanuponabort=1;' >> AnyKernel3/anykernel.sh
+            echo "device.name1=crux" >> AnyKernel3/anykernel.sh
+            echo '} ' >> AnyKernel3/anykernel.sh
+            echo 'BLOCK=boot; IS_SLOT_DEVICE=0; RAMDISK_COMPRESSION=auto; PATCH_VBMETA_FLAG=auto;' >> AnyKernel3/anykernel.sh
+            echo '. /tmp/anykernel/tools/ak3-core.sh;' >> AnyKernel3/anykernel.sh
+            echo 'split_boot;' >> AnyKernel3/anykernel.sh
+            echo 'flash_boot;' >> AnyKernel3/anykernel.sh
+            echo '# flash_dtbo;' >> AnyKernel3/anykernel.sh # 【核心：移除/注释掉 dtb 刷写流】
+            
+            cd AnyKernel3
+            zip -r ../${ZIP_NODTB} *
+            cd ..
+            echo "Successfully generated No-DTB Pack: ${ZIP_NODTB}"
+            
           else
             echo "ERROR: Kernel image not found. Compilation failed."
             exit 1
           fi
 
-      - name: Upload Flashable Kernel Zip
+      - name: Upload Both Kernel Zips
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.FINAL_ZIP_NAME }}
-          path: ${{ env.FINAL_ZIP_NAME }}
+          name: crux-compiled-kernels
+          path: |
+            ${{ env.FINAL_ZIP_NAME }}
+            ${{ env.NO_DTB_ZIP_NAME }}
