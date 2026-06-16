@@ -105,6 +105,15 @@ jobs:
               content = content.replace('arch_show_smap(m, vma);\n\t\tshow_smap_vma_flags(m, vma);',
                   '#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))) goto bypass_orig_flow;\n#endif\n\t\tarch_show_smap(m, vma);\n\t\tshow_smap_vma_flags(m, vma);\n\t}\n\n#ifdef CONFIG_KSU_SUSFS_SUS_MAP\nbypass_orig_flow:\n#endif\n\tif (0) {')
               with open('fs/proc/task_mmu.c', 'w') as f: f.write(content)
+          # 5. drivers/input/input.c: 补全声明，绕过 inline_hook_check.mk 校验
+          with open('drivers/input/input.c', 'r') as f: content = f.read()
+          # 如果已经包含了 ksu_handle，说明 KSU 已经接管，我们只补充 ReSukiSU 校验所需的 extern
+          if 'ksu_handle_input_handle_event' in content and 'extern' not in content:
+              hook_decl = '\nextern __attribute__((cold)) int ksu_handle_input_handle_event(int *type, int *code, int *value);\n'
+              # 插入到文件开头附近
+              content = content.replace('#include <linux/input.h>', '#include <linux/input.h>' + hook_decl)
+              with open('drivers/input/input.c', 'w') as f: f.write(content)
+              print("[+] Injected extern declaration into drivers/input/input.c")
           EOF
           
       - name: Start Kernel Compilation
