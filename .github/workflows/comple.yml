@@ -81,8 +81,14 @@ jobs:
           fi
 
           echo "Compensating SUSFS failed hunks securely..."
+          # =====================================================================
+          # 【SUSFS 头文件防御升级】前置声明 struct kstat 并强行补全 vm_flags_t 定义，彻底解决类型未知报错
+          # =====================================================================
           if [ -f "include/linux/susfs.h" ]; then
+            # 1. 解决 struct kstat 作用域警告
             sed -i '1i struct kstat;' include/linux/susfs.h
+            # 2. 引入基础内存控制头文件，并防御性补全 vm_flags_t 类型定义（兼容非 GKI 4.14 架构）
+            sed -i '1i #include <linux/mm.h>\n#ifndef vm_flags_t\ntypedef unsigned long vm_flags_t;\n#endif' include/linux/susfs.h
           fi
 
           if [ -f "fs/namespace.c" ]; then
@@ -113,7 +119,6 @@ jobs:
             sed -i 's/switch (option) {/switch (option) {\n#ifdef CONFIG_SUSFS\n\tcase PR_SUSFS_GET_VERSION: return susfs_get_version((unsigned long __user *)arg2);\n\tcase PR_SUSFS_SET_STATUS: return susfs_set_status(arg2, (unsigned long __user *)arg3);\n#endif/g' kernel/sys.c
           fi
 
-          # 【干净利落】仅引入头文件，让 dispatch.c 自动读取最新的原生 2.1.x 宏定义，彻底拿掉临时的手写硬编码
           echo "Linking susfs header into KernelSU dispatch..."
           if [ -f "drivers/kernelsu/supercall/dispatch.c" ]; then
             sed -i '1i #include <linux/susfs.h>' drivers/kernelsu/supercall/dispatch.c
