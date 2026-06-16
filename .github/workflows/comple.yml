@@ -97,8 +97,8 @@ jobs:
             echo "Executing precision 1:1 injection on kernel/sys.c..."
             if ! grep -q "susfs.h" kernel/sys.c; then sed -i '1i #include <linux/susfs.h>' kernel/sys.c; fi
             
-            # 定位到 if (error) goto error; 并且下一行是 return 0; 的唯一区间，在它们中间强行插入
-            sed -i '/if (error)/{n;/goto error;/{n;/return 0;/i #ifdef CONFIG_KSU_SUSFS\n\tsusfs_set_uid_into_current_task(ruid, euid, suid);\n#endif\n;}}' kernel/sys.c
+            # 定位到以 goto error; 结尾，且下一行为 return 0; 的精确位置，在 return 0; 前注入
+            sed -i '/goto error;/{n;/return 0;/i #ifdef CONFIG_KSU_SUSFS\n\tsusfs_set_uid_into_current_task(ruid, euid, suid);\n#endif\n}' kernel/sys.c
             echo "[+] kernel/sys.c 门禁拦截完美焊入！"
           fi
 
