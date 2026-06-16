@@ -82,22 +82,21 @@ jobs:
 
           echo "Compensating SUSFS failed hunks securely..."
           # =====================================================================
-          # 【SUSFS v2.1.x ⇄ ReSukiSU 终极桥接适配层】
-          # 强行打通官方原版 SUSFS 与 ReSukiSU 魔改版之间的结构体类型与宏定义断层
+          # 【SUSFS v2.1.x ⇄ ReSukiSU 完美条件隔离层】
+          # 既不破坏 fs/susfs.c 的官方原生实现，又完美欺骗 drivers/kernelsu 的万能指针
           # =====================================================================
           if [ -f "include/linux/susfs.h" ]; then
-            # 1. 基础前置声明与内存标志补全
+            # 1. 解决 struct kstat 作用域警告
             sed -i '1i struct kstat;' include/linux/susfs.h
-            sed -i '1i #include <linux/mm.h>\n#ifndef vm_flags_t\ntypedef unsigned long vm_flags_t;\n#endif' include/linux/susfs.h
             
-            # 2. 核心类型强转与桥接：将 ReSukiSU 传入的 void** 强制解引用适配给官方的 struct*
-            echo "Injecting type-casting bridges for ReSukiSU..."
-            sed -i 's/int susfs_add_sus_path(struct st_susfs_sus_path\* __user user_info);/int susfs_add_sus_path(void* __user user_info);/g' include/linux/susfs.h
-            sed -i 's/int susfs_add_sus_kstat(struct st_susfs_sus_kstat\* __user user_info);/int susfs_add_sus_kstat(void* __user user_info);/g' include/linux/susfs.h
-            sed -i 's/int susfs_update_sus_kstat(struct st_susfs_sus_kstat\* __user user_info);/int susfs_update_sus_kstat(void* __user user_info);/g' include/linux/susfs.h
-            sed -i 's/int susfs_set_uname(struct st_susfs_uname\* __user user_info);/int susfs_set_uname(void* __user user_info);/g' include/linux/susfs.h
+            # 2. 彻底修复 vm_flags_t 重复定义警告：改用宏防御包裹，只有未定义时才声明
+            sed -i '1i #include <linux/mm_types.h>\n#ifndef _LINUX_VM_FLAGS_T_DEF\n#define _LINUX_VM_FLAGS_T_DEF\n#ifndef vm_flags_t\ntypedef unsigned long vm_flags_t;\n#endif\n#endif' include/linux/susfs.h
+            
+            # 3. 注入高级条件桥接层：当且仅当被 KernelSU 引用时，通过宏将参数原地强转为万能指针，而在别处保持官方原版结构
+            echo "Injecting smart micro-routing for KernelSU and SUSFS core..."
+            sed -i '$a \n#ifdef KSU\n#define susfs_add_sus_path(x)       susfs_add_sus_path((struct st_susfs_sus_path*)(x))\n#define susfs_add_sus_kstat(x)      susfs_add_sus_kstat((struct st_susfs_sus_kstat*)(x))\n#define susfs_update_sus_kstat(x)   susfs_update_sus_kstat((struct st_susfs_sus_kstat*)(x))\n#define susfs_set_uname(x)          susfs_set_uname((struct st_susfs_uname*)(x))\n#endif' include/linux/susfs.h
 
-            # 3. 补全 ReSukiSU 依赖的全部高级特征控制宏
+            # 4. 补全 ReSukiSU 依赖的全部高级特征控制宏
             echo "Injecting missing capability macros for ReSukiSU dispatch..."
             sed -i '$a #ifndef CMD_SUSFS_ADD_SUS_PATH_LOOP\n#define CMD_SUSFS_ADD_SUS_PATH_LOOP 0x55555559\n#endif' include/linux/susfs.h
             sed -i '$a #ifndef CMD_SUSFS_HIDE_SUS_MNTS_FOR_NON_SU_PROCS\n#define CMD_SUSFS_HIDE_SUS_MNTS_FOR_NON_SU_PROCS 0x55555560\n#endif' include/linux/susfs.h
@@ -139,26 +138,7 @@ jobs:
           if [ -f "drivers/kernelsu/supercall/dispatch.c" ]; then
             sed -i '1i #include <linux/susfs.h>' drivers/kernelsu/supercall/dispatch.c
           fi
-
-          echo "Linking susfs header into KernelSU dispatch..."
-          if [ -f "drivers/kernelsu/supercall/dispatch.c" ]; then
-            sed -i '1i #include <linux/susfs.h>' drivers/kernelsu/supercall/dispatch.c
-          fi
-          # =====================================================================
-          # 【ReSukiSU 头文件重定向】解决新版 SUSFS 缺失 susfs_def.h 导致的编译中断
-          # =====================================================================
-          echo "Fixing missing linux/susfs_def.h definition for ReSukiSU..."
           
-          # 保险策略 1：如果内核中不存在 susfs_def.h，直接将它软链接到功能更全的 susfs.h
-          if [ ! -f "include/linux/susfs_def.h" ]; then
-            echo "Creating compatibility symlink for susfs_def.h..."
-            ln -sf ./susfs.h include/linux/susfs_def.h
-          fi
-
-          # 保险策略 2：将 KernelSU 源码目录中所有尝试引用 susfs_def.h 的地方，一律修正为标准的 susfs.h
-          echo "Patching KernelSU source references from susfs_def.h to susfs.h..."
-          find drivers/kernelsu/ -type f \( -name "*.c" -o -name "*.h" \) | xargs sed -i 's/linux\/susfs_def.h/linux\/susfs.h/g' 2>/dev/null || true
-
       - name: Start Kernel Compilation
         run: |
           cd $GITHUB_WORKSPACE
