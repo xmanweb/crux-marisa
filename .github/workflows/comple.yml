@@ -81,19 +81,10 @@ jobs:
           fi
 
           echo "Compensating SUSFS failed hunks securely..."
-          # =====================================================================
-          # 【第一步：全面补全头文件前置声明】
-          # 引入标准头文件并前置声明 filename & stat 结构体，彻底消灭 Visibility 警告
-          # =====================================================================
           if [ -f "include/linux/susfs.h" ]; then
             sed -i '1i struct kstat;\nstruct filename;\nstruct stat;' include/linux/susfs.h
             sed -i '1i #include <linux/mm_types.h>' include/linux/susfs.h
             
-            # =====================================================================
-            # 【第二步：无条件指针安全转换层】
-            # 放弃依赖外部无法保障的 KSU 宏，直接通过带参数宏将非标指针强转为官方标准指针。
-            # 为了防止干扰 fs/susfs.c 自身的实现，我们利用专属宏在非核心文件处进行无缝欺骗。
-            # =====================================================================
             echo "Appending explicit type-casting override layer to susfs.h..."
             echo "" >> include/linux/susfs.h
             echo "/* ReSukiSU Non-GKI Pointer Spoofing Layer */" >> include/linux/susfs.h
@@ -105,7 +96,11 @@ jobs:
             echo "#endif" >> include/linux/susfs.h
             echo "" >> include/linux/susfs.h
             
-            # 补全 ReSukiSU 依赖的全部高级特征控制宏
+            # 【幻数补强】防线：强行垫入官方标准 SUSFS_MAGIC，彻底杜绝 supercall 报错
+            echo "#ifndef SUSFS_MAGIC" >> include/linux/susfs.h
+            echo "#define SUSFS_MAGIC 0x55555555" >> include/linux/susfs.h
+            echo "#endif" >> include/linux/susfs.h
+            
             echo "#ifndef CMD_SUSFS_ADD_SUS_PATH_LOOP" >> include/linux/susfs.h
             echo "#define CMD_SUSFS_ADD_SUS_PATH_LOOP 0x55555559" >> include/linux/susfs.h
             echo "#endif" >> include/linux/susfs.h
@@ -135,10 +130,6 @@ jobs:
             echo "#endif" >> include/linux/susfs.h
           fi
 
-          # =====================================================================
-          # 【第三步：对 fs/susfs.c 本身进行宏标记隔离】
-          # 确保只有在编译官方核心 fs/susfs.c 时才会跳过强转宏，维持原生的函数契约
-          # =====================================================================
           if [ -f "fs/susfs.c" ]; then
             sed -i '1i #define __FS_SUSFS_C_INSIDE__' fs/susfs.c
           fi
@@ -168,9 +159,13 @@ jobs:
             sed -i 's/switch (option) {/switch (option) {\n#ifdef CONFIG_SUSFS\n\tcase PR_SUSFS_GET_VERSION: return susfs_get_version((unsigned long __user *)arg2);\n\tcase PR_SUSFS_SET_STATUS: return susfs_set_status(arg2, (unsigned long __user *)arg3);\n#endif/g' kernel/sys.c
           fi
 
-          echo "Linking susfs header into KernelSU dispatch..."
+          # 【精准注入】让 KernelSU 两个核心特权调用文件都引入统一的适配头文件
+          echo "Linking susfs header into KernelSU core calls..."
           if [ -f "drivers/kernelsu/supercall/dispatch.c" ]; then
             sed -i '1i #include <linux/susfs.h>' drivers/kernelsu/supercall/dispatch.c
+          fi
+          if [ -f "drivers/kernelsu/supercall/supercall.c" ]; then
+            sed -i '1i #include <linux/susfs.h>' drivers/kernelsu/supercall/supercall.c
           fi
 
           echo "Fixing missing linux/susfs_def.h definition for ReSukiSU..."
