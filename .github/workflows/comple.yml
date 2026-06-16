@@ -196,7 +196,7 @@ jobs:
             fi
           fi
           
-          # 生成默认配置
+          # 生成 crux 默认配置
           make O=out ARCH=arm64 crux_defconfig
           
           # 激活编译配置项
@@ -238,67 +238,82 @@ jobs:
       - name: Pack Kernel with AnyKernel3 (Dual Output)
         run: |
           cd $GITHUB_WORKSPACE
+          echo "Preparing AnyKernel3 Dual Track Workspace..."
+          
+          BUILD_DATE=$(date -d "+8 hours" +%Y%m%d_%H%M)
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          
+          ZIP_FULL="crux-kernel-resukisu-susfs-${BUILD_DATE}-${SHORT_SHA}-With-DTB.zip"
+          ZIP_NODTB="crux-kernel-resukisu-susfs-${BUILD_DATE}-${SHORT_SHA}-No-DTB.zip"
+          
+          echo "FINAL_ZIP_NAME=${ZIP_FULL}" >> $GITHUB_ENV
+          echo "NO_DTB_ZIP_NAME=${ZIP_NODTB}" >> $GITHUB_ENV
+          
+          # 克隆两份独立的打包环境
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3_with_dtb
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3_no_dtb
+          
+          # 清理无关残留
+          rm -rf ak3_with_dtb/.git ak3_with_dtb/README.md ak3_with_dtb/Image* ak3_with_dtb/zImage*
+          rm -rf ak3_no_dtb/.git ak3_no_dtb/README.md ak3_no_dtb/Image* ak3_no_dtb/zImage*
+          
+          # =====================================================================
+          # 定义动态 anykernel.sh 说明脚本流生成函数
+          # =====================================================================
+          define_properties() {
+            local target_script="$1"
+            local track_mode="$2"
+            
+            echo '# AnyKernel3 Ramdisk Mod Script' > "$target_script"
+            echo 'properties() { ' >> "$target_script"
+            echo "kernel.string=Mi9Pro crux ReSukiSU SUSFS (${track_mode}) - ${BUILD_DATE}" >> "$target_script"
+            echo 'do.devicecheck=1; do.modules=0; do.systemless=1; do.cleanup=1; do.cleanuponabort=1;' >> "$target_script"
+            echo "device.name1=crux" >> "$target_script"
+            echo '} ' >> "$target_script"
+            echo 'BLOCK=boot; IS_SLOT_DEVICE=0; RAMDISK_COMPRESSION=auto; PATCH_VBMETA_FLAG=auto;' >> "$target_script"
+            echo '. /tmp/anykernel/tools/ak3-core.sh;' >> "$target_script"
+            echo 'split_boot;' >> "$target_script"
+            echo 'flash_boot;' >> "$target_script"
+            
+            if [ "$track_mode" = "With-DTB" ]; then
+              echo 'flash_dtbo;' >> "$target_script"
+            else
+              echo '# flash_dtbo;' >> "$target_script"
+            
+          define_properties "ak3_with_dtb/anykernel.sh" "With-DTB"
+          define_properties "ak3_no_dtb/anykernel.sh" "No-DTB"
+
+          # =====================================================================
+          # 精准分发内核核心体 (向你之前的完美分流机制致敬)
+          # =====================================================================
+          echo "Distributing kernel artifacts to dual tracks..."
+          
+          # A. 带 DTB 轨：直接装填编译链内嵌的完整 Image.gz-dtb
           if [ -f "out/arch/arm64/boot/Image.gz-dtb" ]; then
-            echo "Kernel compiled successfully! Preparing AnyKernel3 Dual Pack..."
-            
-            BUILD_DATE=$(date -d "+8 hours" +%Y%m%d_%H%M)
-            SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
-            
-            ZIP_FULL="crux-kernel-resukisu-susfs-${BUILD_DATE}-${SHORT_SHA}-With-DTB.zip"
-            ZIP_NODTB="crux-kernel-resukisu-susfs-${BUILD_DATE}-${SHORT_SHA}-No-DTB.zip"
-            
-            echo "FINAL_ZIP_NAME=${ZIP_FULL}" >> $GITHUB_ENV
-            echo "NO_DTB_ZIP_NAME=${ZIP_NODTB}" >> $GITHUB_ENV
-            
-            # 克隆 AnyKernel3 基准库
-            git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
-            rm -rf AnyKernel3/.git AnyKernel3/README.md AnyKernel3/Image* AnyKernel3/zImage*
-            cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/Image.gz-dtb
-            
-            # =====================================================================
-            # 1. 先生产第一份：【全量含 DTB 刷写包】
-            # =====================================================================
-            echo '# AnyKernel3 Ramdisk Mod Script' > AnyKernel3/anykernel.sh
-            echo 'properties() { ' >> AnyKernel3/anykernel.sh
-            echo "kernel.string=Crux ReSukiSU SUSFS (With DTB) - ${BUILD_DATE} - by xmanweb" >> AnyKernel3/anykernel.sh
-            echo 'do.devicecheck=1; do.modules=0; do.systemless=1; do.cleanup=1; do.cleanuponabort=1;' >> AnyKernel3/anykernel.sh
-            echo "device.name1=crux" >> AnyKernel3/anykernel.sh
-            echo '} ' >> AnyKernel3/anykernel.sh
-            echo 'BLOCK=boot; IS_SLOT_DEVICE=0; RAMDISK_COMPRESSION=auto; PATCH_VBMETA_FLAG=auto;' >> AnyKernel3/anykernel.sh
-            echo '. /tmp/anykernel/tools/ak3-core.sh;' >> AnyKernel3/anykernel.sh
-            echo 'split_boot;' >> AnyKernel3/anykernel.sh
-            echo 'flash_boot;' >> AnyKernel3/anykernel.sh
-            echo 'flash_dtbo;' >> AnyKernel3/anykernel.sh  # 保留全量包的 dtbo 刷写
-            
-            cd AnyKernel3
-            zip -r ../${ZIP_FULL} *
-            cd ..
-            echo "Successfully generated Full Pack: ${ZIP_FULL}"
-            
-            # =====================================================================
-            # 2. 修改配置生产第二份：【干净纯内核不刷写 DTB 包】
-            # =====================================================================
-            echo '# AnyKernel3 Ramdisk Mod Script' > AnyKernel3/anykernel.sh
-            echo 'properties() { ' >> AnyKernel3/anykernel.sh
-            echo "kernel.string=Crux ReSukiSU SUSFS (No DTB) - ${BUILD_DATE} - by xmanweb" >> AnyKernel3/anykernel.sh
-            echo 'do.devicecheck=1; do.modules=0; do.systemless=1; do.cleanup=1; do.cleanuponabort=1;' >> AnyKernel3/anykernel.sh
-            echo "device.name1=crux" >> AnyKernel3/anykernel.sh
-            echo '} ' >> AnyKernel3/anykernel.sh
-            echo 'BLOCK=boot; IS_SLOT_DEVICE=0; RAMDISK_COMPRESSION=auto; PATCH_VBMETA_FLAG=auto;' >> AnyKernel3/anykernel.sh
-            echo '. /tmp/anykernel/tools/ak3-core.sh;' >> AnyKernel3/anykernel.sh
-            echo 'split_boot;' >> AnyKernel3/anykernel.sh
-            echo 'flash_boot;' >> AnyKernel3/anykernel.sh
-            echo '# flash_dtbo;' >> AnyKernel3/anykernel.sh # 【核心：移除/注释掉 dtb 刷写流】
-            
-            cd AnyKernel3
-            zip -r ../${ZIP_NODTB} *
-            cd ..
-            echo "Successfully generated No-DTB Pack: ${ZIP_NODTB}"
-            
+            cp out/arch/arm64/boot/Image.gz-dtb ak3_with_dtb/Image.gz-dtb
+            echo "Image.gz-dtb deployed cleanly to With-DTB track."
           else
-            echo "ERROR: Kernel image not found. Compilation failed."
-            exit 1
+            echo "Error: Image.gz-dtb missing!" && exit 1
           fi
+
+          # B. 不带 DTB 轨：抓取最原始核心体手动 gzip，杜绝任何 Makefile 隐含的 dtb 尾巴
+          if [ -f "out/arch/arm64/boot/Image" ]; then
+            gzip -c out/arch/arm64/boot/Image > ak3_no_dtb/Image.gz
+            echo "Pure Image.gz successfully squashed for No-DTB track."
+          else
+            echo "Error: Base Image missing!" && exit 1
+          fi
+
+          # =====================================================================
+          # 独立执行双向压缩打包
+          # =====================================================================
+          cd ak3_with_dtb
+          zip -r ../${ZIP_FULL} *
+          cd ..
+          
+          cd ak3_no_dtb
+          zip -r ../${ZIP_NODTB} *
+          cd ..
 
       - name: Upload Both Kernel Zips
         uses: actions/upload-artifact@v4
