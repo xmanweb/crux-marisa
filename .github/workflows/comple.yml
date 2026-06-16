@@ -137,41 +137,60 @@ jobs:
           fi
 
           # =====================================================================
-          # 其余核心系统调用拦截挂钩注入
+          # 其余核心系统调用拦截挂钩注入（改用全自动、稳健的大括号精准对齐替换）
           # =====================================================================
           echo "Injecting remaining native ReSukiSU inline hooks into kernel core..."
           
           # 1. 挂钩 kernel/sys.c (处理 setresuid)
           if [ -f "kernel/sys.c" ]; then
-            sed -i '/kuid_t kruid, keuid, ksuid;/i \	extern int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);\n\tksu_handle_setresuid(ruid, euid, suid);' kernel/sys.c
+            # 找到 kuid_t kruid, keuid, ksuid; 这一行，在它后面注入拦截
+            sed -i 's/kuid_t kruid, keuid, ksuid;/kuid_t kruid, keuid, ksuid; extern int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid); ksu_handle_setresuid(ruid, euid, suid);/g' kernel/sys.c
           fi
 
           # 2. 挂钩 kernel/reboot.c (处理 sys_reboot)
           if [ -f "kernel/reboot.c" ]; then
-            sed -i '/SYSCALL_DEFINE4(reboot/i extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user *arg);' kernel/reboot.c
-            sed -i '/struct pid_namespace \*pid_ns = task_active_pid_ns(current);/i \	ksu_handle_sys_reboot(magic1, magic2, cmd, arg);' kernel/reboot.c
+            # 找到 SYSCALL_DEFINE4(reboot... 后的第一个左大括号，精准在其后面注入声明和调用
+            REBOOT_LINE=$(grep -n "SYSCALL_DEFINE4(reboot" kernel/reboot.c | head -n 1 | cut -d: -f1)
+            if [ ! -z "$REBOOT_LINE" ]; then
+              REBOOT_OFFSET=$(tail -n +$REBOOT_LINE kernel/reboot.c | grep -n "{" | head -n 1 | cut -d: -f1)
+              REAL_REBOOT_LN=$((REBOOT_LINE + REBOOT_OFFSET - 1))
+              sed -i "${REAL_REBOOT_LN}s@{ @{ extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user *arg); ksu_handle_sys_reboot(magic1, magic2, cmd, arg); @g" kernel/reboot.c
+            fi
           fi
 
           # 3. fs/open.c (处理 faccessat)
           if [ -f "fs/open.c" ]; then
-            sed -i '/if (mode & ~S_IRWXO)/i \	extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n\tksu_handle_faccessat(&dfd, &filename, (int *)&mode, NULL);' fs/open.c
+            # 找到 if (mode \& ~S_IRWXO) 这一行，在它前面（上万全插入声明和调用）
+            sed -i 's/if (mode & ~S_IRWXO)/extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags); ksu_handle_faccessat(\&dfd, \&filename, (int *)&mode, NULL); if (mode \& ~S_IRWXO)/g' fs/open.c
           fi
 
           # 4. fs/exec.c (处理 execveat)
           if [ -f "fs/exec.c" ]; then
-            sed -i '/retval = bprm_mm_init(bprm);/i \	extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);' fs/exec.c
+            # 找到 retval = bprm_mm_init(bprm); 并在其前面注入
+            sed -i 's/retval = bprm_mm_init(bprm);/extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags); ksu_handle_execveat(\&fd, \&filename, \&argv, \&envp, \&flags); retval = bprm_mm_init(bprm);/g' fs/exec.c
           fi
 
           # 5. fs/stat.c (处理 stat)
           if [ -f "fs/stat.c" ]; then
-            sed -i '/struct path path;/a \	extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\n\tksu_handle_stat(&dfd, &filename, &flag);' fs/stat.c
+            # 找到 struct path path; 并在其后追加声明与调用
+            sed -i 's/struct path path;/struct path path; extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags); ksu_handle_stat(\&dfd, \&filename, \&flag);/g' fs/stat.c
           fi
 
-          # 6. fs/read_write.c (处理 sys_read)
+          # 6. fs/read_write.c (彻底修复此处的 vfs_read 挂钩翻车)
           if [ -f "fs/read_write.c" ]; then
-            sed -i '/ssize_t vfs_read(struct file \*file, char __user \*buf, size_t count, loff_t \*pos)/a \	extern int ksu_handle_sys_read(struct file **file_ptr, char __user **buf_ptr, size_t *count_ptr, loff_t **pos_ptr);\n\tksu_handle_sys_read(&file, (char __user **)&buf, &count, &pos);' fs/read_write.c
+            # 定位 vfs_read 函数定义的起始行号
+            VFS_READ_LINE=$(grep -n "ssize_t vfs_read(struct file" fs/read_write.c | head -n 1 | cut -d: -f1)
+            if [ ! -z "$VFS_READ_LINE" ]; then
+              # 动态向后锁定该函数真正的起始左大括号 `{`
+              VFS_READ_OFFSET=$(tail -n +$VFS_READ_LINE fs/read_write.c | grep -n "{" | head -n 1 | cut -d: -f1)
+              REAL_VFS_LN=$((VFS_READ_LINE + VFS_READ_OFFSET - 1))
+              echo "Clean vfs_read brace locked at line: $REAL_VFS_LN"
+              
+              # 精准将代码注入到大括号内部起始处，绝不破坏外围函数头结构
+              sed -i "${REAL_VFS_LN}s@{ @{ extern int ksu_handle_sys_read(struct file **file_ptr, char __user **buf_ptr, size_t *count_ptr, loff_t **pos_ptr); ksu_handle_sys_read(\&file, (char __user **)\&buf, \&count, \&pos); @g" fs/read_write.c
+            fi
           fi
-
+          
           # 生成原本的基础默认配置
           make O=out ARCH=arm64 crux_defconfig
           
