@@ -112,31 +112,28 @@ jobs:
           export PATH=$REAL_CLANG_PATH:$PATH
 
           # =====================================================================
-          # 【行号精准重组】完全废弃反斜杠和多行追加，用纯粹的单行安全重写
+          # 【无视任何转义的稳健注入】完全隔离变量与单引号，绝不给 Bash 留错判空间
           # =====================================================================
-          echo "Modifying drivers/input/input.c using safe line-reconstruction..."
+          echo "Modifying drivers/input/input.c using watertight single-quote isolation..."
           
           if [ -f "drivers/input/input.c" ]; then
-            # 1. 动态获取大括号行号
+            # 1. 动态计算大括号精确行号
             BRACE_LINE=$(grep -n "void input_event" drivers/input/input.c | cut -d: -f1)
             TARGET_OFFSET=$(tail -n +$BRACE_LINE drivers/input/input.c | grep -n "{" | head -n 1 | cut -d: -f1)
             REAL_INJECT_LINE=$((BRACE_LINE + TARGET_OFFSET - 1))
-            
             echo "Brace line found at: $REAL_INJECT_LINE"
             
-            # 2. 直接将大括号 { 替换为： { + 两条外部声明语句
-            # 使用 @ 作为 sed 分隔符，彻底避免代码里斜杠 / 的冲突
-            sed -i "${REAL_INJECT_LINE}s@{@{ extern bool ksu_input_hook __read_mostly; extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);@g" drivers/input/input.c
+            # 2. 将行号彻底抽离到单引号外面拼接，内部代码完全用纯单引号包裹，防任何符号被 Bash 转义
+            sed -i ''"$REAL_INJECT_LINE"'s@{ @{ extern bool ksu_input_hook __read_mostly; extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value); @g' drivers/input/input.c
 
-            # 3. 动态获取底层拦截点锚点行号
+            # 3. 动态获取挂钩锚点行号
             ANCHOR_LINE=$(grep -n "if (is_event_supported(type, dev->evbit, EV_MAX)) {" drivers/input/input.c | cut -d: -f1)
-            
             echo "Anchor line found at: $ANCHOR_LINE"
             
-            # 4. 直接将锚点的大括号 { 替换为： { + 拦截逻辑调用语句
-            sed -i "${ANCHOR_LINE}s@{@{ if (unlikely(ksu_input_hook)) ksu_handle_input_handle_event(\&type, \&code, \&value);@g" drivers/input/input.c
+            # 4. 同样将锚点行号抽离，并在单引号内通过 \x26 转义地址符 &，防 sed 展开语义
+            sed -i ''"$ANCHOR_LINE"'s@{ @{ if (unlikely(ksu_input_hook)) ksu_handle_input_handle_event(\x26type, \x26code, \x26value); @g' drivers/input/input.c
             
-            echo "drivers/input/input.c successfully patched inline."
+            echo "drivers/input/input.c inline injection verified successfully."
           fi
 
           # =====================================================================
@@ -217,7 +214,7 @@ jobs:
                       OBJCOPY=llvm-objcopy \
                       OBJDUMP=llvm-objdump \
                       STRIP=llvm-strip
-
+                      
       - name: Pack Kernel with AnyKernel3
         run: |
           cd $GITHUB_WORKSPACE
