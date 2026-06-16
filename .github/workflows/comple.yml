@@ -137,19 +137,22 @@ jobs:
           fi
 
           # =====================================================================
-          # 其余核心系统调用拦截挂钩注入（改用全自动、稳健的大括号精准对齐替换）
+          # 其余核心系统调用拦截挂钩注入（全盘升级为最稳妥的大括号精准内联法）
           # =====================================================================
           echo "Injecting remaining native ReSukiSU inline hooks into kernel core..."
           
           # 1. 挂钩 kernel/sys.c (处理 setresuid)
           if [ -f "kernel/sys.c" ]; then
-            # 找到 kuid_t kruid, keuid, ksuid; 这一行，在它后面注入拦截
-            sed -i 's/kuid_t kruid, keuid, ksuid;/kuid_t kruid, keuid, ksuid; extern int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid); ksu_handle_setresuid(ruid, euid, suid);/g' kernel/sys.c
+            SYS_LINE=$(grep -n "k_sys_setresuid(uid_t ruid" kernel/sys.c || grep -n "SYSCALL_DEFINE3(setresuid" kernel/sys.c | head -n 1 | cut -d: -f1)
+            if [ ! -z "$SYS_LINE" ]; then
+              SYS_OFFSET=$(tail -n +$SYS_LINE kernel/sys.c | grep -n "{" | head -n 1 | cut -d: -f1)
+              REAL_SYS_LN=$((SYS_LINE + SYS_OFFSET - 1))
+              sed -i "${REAL_SYS_LN}s@{ @{ extern int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid); ksu_handle_setresuid(ruid, euid, suid); @g" kernel/sys.c
+            fi
           fi
 
           # 2. 挂钩 kernel/reboot.c (处理 sys_reboot)
           if [ -f "kernel/reboot.c" ]; then
-            # 找到 SYSCALL_DEFINE4(reboot... 后的第一个左大括号，精准在其后面注入声明和调用
             REBOOT_LINE=$(grep -n "SYSCALL_DEFINE4(reboot" kernel/reboot.c | head -n 1 | cut -d: -f1)
             if [ ! -z "$REBOOT_LINE" ]; then
               REBOOT_OFFSET=$(tail -n +$REBOOT_LINE kernel/reboot.c | grep -n "{" | head -n 1 | cut -d: -f1)
@@ -158,36 +161,47 @@ jobs:
             fi
           fi
 
-          # 3. fs/open.c (处理 faccessat)
+          # 3. fs/open.c (彻底修复 faccessat 挂钩处的 & 展开崩溃)
           if [ -f "fs/open.c" ]; then
-            # 找到 if (mode \& ~S_IRWXO) 这一行，在它前面（上万全插入声明和调用）
-            sed -i 's/if (mode & ~S_IRWXO)/extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags); ksu_handle_faccessat(\&dfd, \&filename, (int *)&mode, NULL); if (mode \& ~S_IRWXO)/g' fs/open.c
+            # 兼容 4.14 不同的面具/内核函数命名特征，精准锁定 faccessat 核心实现起点
+            FAC_LINE=$(grep -n "do_faccessat(int dfd" fs/open.c || grep -n "SYSCALL_DEFINE3(faccessat" fs/open.c | head -n 1 | cut -d: -f1)
+            if [ ! -z "$FAC_LINE" ]; then
+              FAC_OFFSET=$(tail -n +$FAC_LINE fs/open.c | grep -n "{" | head -n 1 | cut -d: -f1)
+              REAL_FAC_LN=$((FAC_LINE + FAC_OFFSET - 1))
+              echo "Clean faccessat brace locked at line: $REAL_FAC_LN"
+              
+              # 通过使用十六进制 \x26 代替原生 &，彻底防止 sed 误当成匹配宏展开
+              sed -i "${REAL_FAC_LN}s@{ @{ extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags); ksu_handle_faccessat(\x26dfd, \x26filename, (int *)\x26mode, NULL); @g" fs/open.c
+            fi
           fi
 
           # 4. fs/exec.c (处理 execveat)
           if [ -f "fs/exec.c" ]; then
-            # 找到 retval = bprm_mm_init(bprm); 并在其前面注入
-            sed -i 's/retval = bprm_mm_init(bprm);/extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags); ksu_handle_execveat(\&fd, \&filename, \&argv, \&envp, \&flags); retval = bprm_mm_init(bprm);/g' fs/exec.c
+            EXEC_LINE=$(grep -n "do_execveat_common(int dfd" fs/exec.c || grep -n "__do_execveat_file(int dfd" fs/exec.c | head -n 1 | cut -d: -f1)
+            if [ ! -z "$EXEC_LINE" ]; then
+              EXEC_OFFSET=$(tail -n +$EXEC_LINE fs/exec.c | grep -n "{" | head -n 1 | cut -d: -f1)
+              REAL_EXEC_LN=$((EXEC_LINE + EXEC_OFFSET - 1))
+              sed -i "${REAL_EXEC_LN}s@{ @{ extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags); ksu_handle_execveat(\x26fd, \x26filename, \x26argv, \x26envp, \x26flags); @g" fs/exec.c
+            fi
           fi
 
-          # 5. fs/stat.c (处理 stat)
+          # 5. fs/stat.c (处理 vfs_statx / vfs_fstatat)
           if [ -f "fs/stat.c" ]; then
-            # 找到 struct path path; 并在其后追加声明与调用
-            sed -i 's/struct path path;/struct path path; extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags); ksu_handle_stat(\&dfd, \&filename, \&flag);/g' fs/stat.c
+            STAT_LINE=$(grep -n "vfs_fstatat(int dfd" fs/stat.c || grep -n "vfs_statx(int dfd" fs/stat.c | head -n 1 | cut -d: -f1)
+            if [ ! -z "$STAT_LINE" ]; then
+              STAT_OFFSET=$(tail -n +$STAT_LINE fs/stat.c | grep -n "{" | head -n 1 | cut -d: -f1)
+              REAL_STAT_LN=$((STAT_LINE + STAT_OFFSET - 1))
+              sed -i "${REAL_STAT_LN}s@{ @{ extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags); ksu_handle_stat(\x26dfd, \x26filename, \x26flag); @g" fs/stat.c
+            fi
           fi
 
-          # 6. fs/read_write.c (彻底修复此处的 vfs_read 挂钩翻车)
+          # 6. fs/read_write.c (处理 sys_read)
           if [ -f "fs/read_write.c" ]; then
-            # 定位 vfs_read 函数定义的起始行号
             VFS_READ_LINE=$(grep -n "ssize_t vfs_read(struct file" fs/read_write.c | head -n 1 | cut -d: -f1)
             if [ ! -z "$VFS_READ_LINE" ]; then
-              # 动态向后锁定该函数真正的起始左大括号 `{`
               VFS_READ_OFFSET=$(tail -n +$VFS_READ_LINE fs/read_write.c | grep -n "{" | head -n 1 | cut -d: -f1)
               REAL_VFS_LN=$((VFS_READ_LINE + VFS_READ_OFFSET - 1))
-              echo "Clean vfs_read brace locked at line: $REAL_VFS_LN"
-              
-              # 精准将代码注入到大括号内部起始处，绝不破坏外围函数头结构
-              sed -i "${REAL_VFS_LN}s@{ @{ extern int ksu_handle_sys_read(struct file **file_ptr, char __user **buf_ptr, size_t *count_ptr, loff_t **pos_ptr); ksu_handle_sys_read(\&file, (char __user **)\&buf, \&count, \&pos); @g" fs/read_write.c
+              sed -i "${REAL_VFS_LN}s@{ @{ extern int ksu_handle_sys_read(struct file **file_ptr, char __user **buf_ptr, size_t *count_ptr, loff_t **pos_ptr); ksu_handle_sys_read(\x26file, (char __user **)\x26buf, \x26count, \x26pos); @g" fs/read_write.c
             fi
           fi
           
