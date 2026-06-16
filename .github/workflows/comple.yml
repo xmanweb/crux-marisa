@@ -40,6 +40,10 @@ jobs:
           cd $GITHUB_WORKSPACE
           curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.14.patch" -o susfs_to_414.patch
           patch -p1 < susfs_to_414.patch || echo "Patching finished."
+         
+          echo "=== 以下是补丁失败的详情，请查看这些 .rej 文件 ==="
+          find . -name "*.rej" -exec cat {} \; > reject_details.txt
+          cat reject_details.txt
 
       - name: "STEP 3: Execute Adaptation Scripts"
         run: |
