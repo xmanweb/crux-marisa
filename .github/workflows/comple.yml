@@ -97,16 +97,16 @@ jobs:
             sed -i '/mnt_group_start = mnt->mnt_group_id + 1;/i #endif\nbypass_orig_flow:' fs/namespace.c
           fi
 
-          # 【修复 3】补救 fs/proc/cmdline.c ——【已修复大括号语法错误】
+          # 【修复 3】补救 fs/proc/cmdline.c ——【已修复行号带连字符导致的 sed 报错】
           if [ -f "fs/proc/cmdline.c" ]; then
             echo "Manually injecting failed SUSFS code into fs/proc/cmdline.c..."
             # 1. 注入顶部声明
             sed -i '/static int cmdline_proc_show/i #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\nextern struct static_key_false susfs_is_fake_cmdline_or_bootconfig_buffer_set;\nextern void susfs_spoof_cmdline_or_bootconfig(struct seq_file *m);\n#endif' fs/proc/cmdline.c
             
-            # 2. 定位到函数开头的第一个 {，并利用绝对行号精准注入拦截逻辑
-            CMDLINE_LN=$(grep -n -A 2 "static int cmdline_proc_show" fs/proc/cmdline.c | grep "{" | head -n 1 | cut -d: -f1)
+            # 2. 纯安全 awk 过滤：寻找函数名后下方的第一个左大括号，彻底过滤非数字字符
+            CMDLINE_LN=$(awk '/static int cmdline_proc_show/,/{/{if($0 ~ /{/){print NR; exit}}' fs/proc/cmdline.c)
             if [ ! -z "$CMDLINE_LN" ]; then
-              echo "cmdline_proc_show brace found at line: $CMDLINE_LN"
+              echo "Pure clean line number locked at: $CMDLINE_LN"
               sed -i "${CMDLINE_LN}a #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\n\tif (static_branch_likely(&susfs_is_fake_cmdline_or_bootconfig_buffer_set)) {\n\t\tsusfs_spoof_cmdline_or_bootconfig(m);\n\t\tseq_printf(m, \"%s\\\\n\");\n\t\treturn 0;\n\t}\n#endif" fs/proc/cmdline.c
             fi
           fi
