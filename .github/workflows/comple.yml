@@ -80,10 +80,22 @@ jobs:
           fi
 
           echo "Compensating SUSFS failed hunks securely..."
+          # 1. 彻底解决 struct kstat 作用域警告：直接在 susfs.h 最顶部前置声明它
+          if [ -f "include/linux/susfs.h" ]; then
+            sed -i '1i struct kstat;' include/linux/susfs.h
+          fi
+
           if [ -f "fs/namespace.c" ]; then
             sed -i '1i #include <linux/susfs.h>' fs/namespace.c
+            
+            # 2. 如果标准补丁没有成功注入 mnt_is_susfs，我们自己注入一个不依赖 mnt_id_lock 的纯净免锁版
             if ! grep -q "bool mnt_is_susfs" fs/namespace.c; then
-              sed -i '/static inline inline_mnt/i #ifdef CONFIG_SUSFS\nbool mnt_is_susfs(struct vfsmount *mnt) { return (mnt->mnt_flags & MNT_SUSFS); }\n#endif\n' fs/namespace.c
+              sed -i '/static inline inline_mnt/i #ifdef CONFIG_SUSFS\nbool mnt_is_susfs(struct vfsmount *mnt) { if (!mnt) return false; return (mnt->mnt_flags & MNT_SUSFS); }\n#endif\n' fs/namespace.c
+            else
+              # 3. 如果补丁已经成功注入了但带有多余的 mnt_id_lock 逻辑，我们直接物理重写该函数，彻底抹除 mnt_id_lock
+              echo "Fixing predefined mnt_is_susfs lock dependencies..."
+              # 动态将原有的旧函数整体重写为安全版本
+              sed -i '/bool mnt_is_susfs/,/^}/c\#ifdef CONFIG_SUSFS\nbool mnt_is_susfs(struct vfsmount *mnt) { if (!mnt) return false; return (mnt->mnt_flags \& MNT_SUSFS); }\n#endif' fs/namespace.c
             fi
           fi
 
@@ -92,7 +104,7 @@ jobs:
           fi
 
           if [ -f "fs/proc/task_mmu.c" ]; then
-            sed -i 's/show_map_vma(m, vma, is_pid);/#ifdef CONFIG_SUSFS\n\tif (mnt_is_susfs(vma->vm_file->f_path.mnt)) { return 0; }\n#endif\n\tshow_map_vma(m, vma, is_pid);/g' fs/proc/task_mmu.c
+            sed -i 's/show_map_vma(m, vma, is_pid);/#ifdef CONFIG_SUSFS\n\tif (vma->vm_file \&\& vma->vm_file->f_path.mnt \&\& mnt_is_susfs(vma->vm_file->f_path.mnt)) { return 0; }\n#endif\n\tshow_map_vma(m, vma, is_pid);/g' fs/proc/task_mmu.c
           fi
 
           if [ -f "kernel/sys.c" ]; then
