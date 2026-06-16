@@ -43,7 +43,7 @@ jobs:
           
           if [ -f "susfs_to_414.patch" ]; then
             echo "Applying susfs_to_414.patch to the clean kernel tree..."
-            patch -p1 < susfs_to_414.patch || echo "Notice: Baseline patch finished with some offset/hunk adjustments."
+            patch -p1 < susfs_to_414.patch || echo "Notice: Baseline patch finished. Rej files handled via subsequent manual step injection."
           fi
 
       - name: "PHASE 2: Integrate Official ReSukiSU"
@@ -58,11 +58,10 @@ jobs:
           echo "====================================================================="
           echo "  STEP 1: Download & Execute JackA1ltman Inline Hook Script         "
           echo "====================================================================="
-          # 在 ReSukiSU 释放出 KernelSU 源码后，再让此脚本去扫 drivers/kernelsu/
           curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/susfs_inline_hook_patches.sh" -o susfs_inline_hook_patches.sh
           chmod +x susfs_inline_hook_patches.sh
           echo "Executing JackA1ltman inline patch script..."
-          bash susfs_inline_hook_patches.sh || echo "Notice: VFS tree and KernelSU adaptation finished."
+          bash susfs_inline_hook_patches.sh || echo "Notice: VFS tree adaptation finished."
           
           # 修复原本脚本的拼写碎裂错误
           find drivers/Kconfig KernelSU/ -type f \( -name "*.c" -o -name "*.h" \) | xargs sed -i 's/linux\/susfs_def.h/linux\/susfs.h/g' 2>/dev/null || true
@@ -79,17 +78,60 @@ jobs:
           export PATH=$REAL_CLANG_PATH:$PATH
 
           # =====================================================================
-          # "PHASE 4: Precision Hook Injection"
+          # "PHASE 4: Fix SUSFS Patch Failures & Precision Hook Injection"
+          # =====================================================================
+          
+          # 【修复 1】补救 kernel/sys.c 中脱靶的 newuname 伪造
+          if [ -f "kernel/sys.c" ]; then
+            echo "Manually injecting failed SUSFS code into kernel/sys.c..."
+            # 注入全局外部声明
+            sed -i '/SYSCALL_DEFINE1(newuname/i #ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME\nextern struct static_key_false susfs_is_uname_spoof_buffer_set;\nextern void susfs_spoof_uname(struct new_utsname* tmp);\n#endif' kernel/sys.c
+            # 注入结构体内的欺骗入口
+            sed -i '/memcpy(&tmp, utsname(), sizeof(tmp));/a #ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME\n\tif (static_branch_likely(&susfs_is_uname_spoof_buffer_set))\n\t\tsusfs_spoof_uname(&tmp);\n#endif' kernel/sys.c
+          fi
+
+          # 【修复 2】补救 fs/namespace.c 中脱靶的 unshared mnt 绕过
+          if [ -f "fs/namespace.c" ]; then
+            echo "Manually injecting failed SUSFS code into fs/namespace.c..."
+            # 1. mnt_free_id 拦截
+            sed -i '/int id = mnt->mnt_id;/a #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (mnt->mnt.mnt_flags & VFSMOUNT_MNT_FLAGS_KSU_UNSHARED_MNT)\n\t\treturn;\n#endif' fs/namespace.c
+            # 2. mnt_alloc_group_id 接管
+            sed -i '/if (!ida_pre_get(&mnt_group_ida, GFP_KERNEL))/i #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (susfs_is_current_ksu_domain()) {\n\t\tif (!ida_pre_get(&mnt_group_ida, GFP_KERNEL))\n\t\t\treturn -ENOMEM;\n\t\tres = ida_get_new_above(&mnt_group_ida, DEFAULT_KSU_MNT_GROUP_ID, \&mnt->mnt_group_id);\n\t\tgoto bypass_orig_flow;\n\t}\n#endif' fs/namespace.c
+            sed -i '/res = ida_get_new_above(&mnt_group_ida,/i #ifndef CONFIG_KSU_SUSFS_SUS_MOUNT' fs/namespace.c
+            sed -i '/mnt_group_start = mnt->mnt_group_id + 1;/i #endif\nbypass_orig_flow:' fs/namespace.c
+          fi
+
+          # 【修复 3】补救 fs/proc/cmdline.c 中脱靶的 cmdline 伪造
+          if [ -f "fs/proc/cmdline.c" ]; then
+            echo "Manually injecting failed SUSFS code into fs/proc/cmdline.c..."
+            sed -i '/static int cmdline_proc_show/i #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\nextern struct static_key_false susfs_is_fake_cmdline_or_bootconfig_buffer_set;\nextern void susfs_spoof_cmdline_or_bootconfig(struct seq_file *m);\n#endif' fs/proc/cmdline.c
+            sed -i '/static int cmdline_proc_show(struct seq_file \*m, void \*v)/{n;i #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\n\tif (static_branch_likely(&susfs_is_fake_cmdline_or_bootconfig_buffer_set)) {\n\t\tsusfs_spoof_cmdline_or_bootconfig(m);\n\t\tseq_printf(m, "%s\\n");\n\t\treturn 0;\n\t}\n#endif' fs/proc/cmdline.c
+          fi
+
+          # 【修复 4】全面抢救 fs/proc/task_mmu.c 中脱靶的 show_smap 与头文件引用
+          if [ -f "fs/proc/task_mmu.c" ]; then
+            echo "Manually injecting failed SUSFS code into fs/proc/task_mmu.c..."
+            # 注入头文件
+            sed -i '/#include <linux\/uaccess.h>/i #if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)\n#include <linux/susfs.h>\n#endif' fs/proc/task_mmu.c
+            
+            # 注入第一段：if (!rollup_mode) 处拦截
+            sed -i '/if (!rollup_mode)/a #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tif (vma->vm_file) {\n\t\tif (SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n\t\t\treturn 0;\n\t}\n#endif' fs/proc/task_mmu.c
+
+            # 注入第二段：arch_show_smap(m, vma); 前拦截并跳转
+            sed -i '/arch_show_smap(m, vma);/i #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tif (vma->vm_file) {\n\t\tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n\t\t\tgoto bypass_orig_flow;\n\t}\n#endif' fs/proc/task_mmu.c
+            sed -i '/m_cache_vma(m, vma);/i #ifdef CONFIG_KSU_SUSFS_SUS_MAP\nbypass_orig_flow:\n#endif' fs/proc/task_mmu.c
+          fi
+
+          # =====================================================================
+          # 既有正常逻辑：老哥你自己的 Precision Hook 注入
           # =====================================================================
           echo "Modifying drivers/input/input.c safely with clean single-line variables..."
           if [ -f "drivers/input/input.c" ]; then
             BRACE_LINE=$(grep -n "void input_event" drivers/input/input.c | head -n 1 | cut -d: -f1)
             TARGET_OFFSET=$(tail -n +$BRACE_LINE drivers/input/input.c | grep -n "{" | head -n 1 | cut -d: -f1)
             REAL_INJECT_LINE=$((BRACE_LINE + TARGET_OFFSET - 1))
-            echo "Clean brace line locked at: $REAL_INJECT_LINE"
             
             ANCHOR_LINE=$(grep -n "if (is_event_supported" drivers/input/input.c | head -n 1 | cut -d: -f1)
-            echo "Clean anchor line locked at: $ANCHOR_LINE"
             
             sed -i "${REAL_INJECT_LINE}s@{ @{ extern bool ksu_input_hook __read_mostly; extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value); @g" drivers/input/input.c
             sed -i "${ANCHOR_LINE}s@{ @{ if (unlikely(ksu_input_hook)) ksu_handle_input_handle_event(\x26type, \x26code, \x26value); @g" drivers/input/input.c
@@ -124,7 +166,6 @@ jobs:
             if [ ! -z "$FAC_LINE" ]; then
               FAC_OFFSET=$(tail -n +$FAC_LINE fs/open.c | grep -n "{" | head -n 1 | cut -d: -f1)
               REAL_FAC_LN=$((FAC_LINE + FAC_OFFSET - 1))
-              echo "Clean faccessat brace locked at line: $REAL_FAC_LN"
               sed -i "${REAL_FAC_LN}s@{ @{ extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags); ksu_handle_faccessat(\x26dfd, \x26filename, (int *)\x26mode, NULL); @g" fs/open.c
             fi
           fi
