@@ -53,20 +53,60 @@ jobs:
           curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/susfs_inline_hook_patches.sh" -o susfs_inline_hook_patches.sh
           chmod +x susfs_inline_hook_patches.sh && bash susfs_inline_hook_patches.sh
 
-      - name: "STEP 4: Precision Surgery & Symbol Completion"
+      - name: "STEP 2: Precision Surgery (Complete Implementation)"
         run: |
-          cd $GITHUB_WORKSPACE
-          if [ -f "kernel/sys.c" ]; then
-            if ! grep -q "ksu_handle_setresuid" kernel/sys.c; then
-              sed -i '/SYSCALL_DEFINE3(setresuid/i extern int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);\nint ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid) {\n\tsusfs_set_uid_into_current_task(ruid, euid, suid);\n\treturn 0;\n}\n' kernel/sys.c
-            fi
-          fi
-          sed -i '1i #include <linux/susfs.h>' fs/namespace.c fs/proc/task_mmu.c fs/proc/cmdline.c 2>/dev/null || true
-          sed -i '/static int mnt_alloc_group_id/i extern int mnt_already_visible(struct vfsmount *mnt, bool *get_next_mnt);' fs/namespace.c
-          sed -i '/struct mount \*mnt = real_mount(v);/a #ifdef CONFIG_KSU_SUSFS\n\tif (likely(check_is_mnt_devname_susfs_stat)) {\n\t\tbool get_next_mnt = false;\n\t\tif (mnt_already_visible(&mnt->mnt, &get_next_mnt)) {\n\t\t\tif (get_next_mnt) return 0;\n\t\t}\n\t}\n#endif' fs/namespace.c
-          sed -i '/struct file \*file = vma->vm_file;/a #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tstruct file *susfs_spoof_file = NULL;\n\tif (unlikely(susfs_is_vma_file_sus_maps(vma))) {\n\t\tsusfs_spoof_file = susfs_get_spoof_file_vma(vma);\n\t\tif (susfs_spoof_file) {\n\t\t\tfile = susfs_spoof_file;\n\t\t}\n\t}\n#endif' fs/proc/task_mmu.c
-          sed -i '/saved_command_line/i #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\n\tif (susfs_spoof_cmdline_or_bootconfig) {\n\t\tseq_printf(m, "%s\\n", susfs_cmdline_or_bootconfig);\n\t\treturn 0;\n\t}\n#endif' fs/proc/cmdline.c
+          python3 - <<EOF
+          import os
 
+          def replace_block(file_path, old_text, new_text):
+              if not os.path.exists(file_path): return
+              with open(file_path, 'r') as f: content = f.read()
+              if new_text in content: return
+              if old_text in content:
+                  with open(file_path, 'w') as f: f.write(content.replace(old_text, new_text))
+                  print(f"[+] Patched {file_path}")
+
+          # 1. kernel/sys.c: newuname 注入
+          replace_block('kernel/sys.c', 
+              'down_read(&uts_sem);\n\tmemcpy(&tmp, utsname(), sizeof(tmp));',
+              'down_read(&uts_sem);\n\tmemcpy(&tmp, utsname(), sizeof(tmp));\n#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME\n\tif (static_branch_likely(&susfs_is_uname_spoof_buffer_set))\n\t\tsusfs_spoof_uname(&tmp);\n#endif')
+
+          # 2. fs/namespace.c: mnt_alloc_group_id 逻辑替换
+          # 这是最复杂的挂载点，必须完全替换原有的 id 分配逻辑
+          with open('fs/namespace.c', 'r') as f: content = f.read()
+          old_code = 'res = ida_get_new_above(&mnt_group_ida,\n\t\t\tmnt_group_start,\n\t\t\t&mnt->mnt_group_id);'
+          new_code = '''
+          #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+          	if (susfs_is_current_ksu_domain()) {
+          		if (!ida_pre_get(&mnt_group_ida, GFP_KERNEL)) return -ENOMEM;
+          		res = ida_get_new_above(&mnt_group_ida, DEFAULT_KSU_MNT_GROUP_ID, &mnt->mnt_group_id);
+          		goto bypass_orig_flow;
+          	}
+          	if (!ida_pre_get(&mnt_group_ida, GFP_KERNEL)) return -ENOMEM;
+          	res = ida_get_new_above(&mnt_group_ida, mnt_group_start, &mnt->mnt_group_id);
+          bypass_orig_flow:
+          #else
+          	if (!ida_pre_get(&mnt_group_ida, GFP_KERNEL)) return -ENOMEM;
+          	res = ida_get_new_above(&mnt_group_ida, mnt_group_start, &mnt->mnt_group_id);
+          #endif'''
+          if 'bypass_orig_flow' not in content:
+              with open('fs/namespace.c', 'w') as f: f.write(content.replace(old_code, new_code))
+
+          # 3. fs/proc/cmdline.c: Cmdline 注入
+          replace_block('fs/proc/cmdline.c', 
+              'static int cmdline_proc_show(struct seq_file *m, void *v)\n{',
+              '#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\nextern struct static_key_false susfs_is_fake_cmdline_or_bootconfig_buffer_set;\nextern void susfs_spoof_cmdline_or_bootconfig(struct seq_file *m);\n#endif\nstatic int cmdline_proc_show(struct seq_file *m, void *v)\n{\n#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\n\tif (static_branch_likely(&susfs_is_fake_cmdline_or_bootconfig_buffer_set)) {\n\t\tsusfs_spoof_cmdline_or_bootconfig(m);\n\t\tseq_printf(m, "%s\\n");\n\t\treturn 0;\n\t}\n#endif')
+
+          # 4. fs/proc/task_mmu.c: Smap 过滤逻辑
+          # 补全失败的 Hunk #5, #6, #7
+          with open('fs/proc/task_mmu.c', 'r') as f: content = f.read()
+          if 'bypass_orig_flow' not in content:
+              content = content.replace('if (!rollup_mode)', '#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))) return 0;\n#endif\n\tif (!rollup_mode)')
+              content = content.replace('arch_show_smap(m, vma);\n\t\tshow_smap_vma_flags(m, vma);',
+                  '#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))) goto bypass_orig_flow;\n#endif\n\t\tarch_show_smap(m, vma);\n\t\tshow_smap_vma_flags(m, vma);\n\t}\n\n#ifdef CONFIG_KSU_SUSFS_SUS_MAP\nbypass_orig_flow:\n#endif\n\tif (0) {')
+              with open('fs/proc/task_mmu.c', 'w') as f: f.write(content)
+          EOF
+          
       - name: Start Kernel Compilation
         run: |
           cd $GITHUB_WORKSPACE
