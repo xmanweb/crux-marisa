@@ -33,79 +33,52 @@ jobs:
           mkdir -p zyc-clang
           tar -xzf Clang-16.0.6-20260510.tar.gz -C zyc-clang
 
-      - name: Integrate Official ReSukiSU
+      - name: "STEP 1: Integrate SUSFS Baseline Patch on Native Tree"
         run: |
           cd $GITHUB_WORKSPACE
-          echo "Integrating Official ReSukiSU..."
-          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s main || curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
-
-      - name: Integrate SUSFS 2.1.x via JackA1ltman Non-GKI Pipeline
-        run: |
-          cd $GITHUB_WORKSPACE
-          
           echo "====================================================================="
-          echo "  STEP 1: Download & Apply Baseline Patch First (Generate Source)   "
+          echo "  Applying SUSFS 4.14 Patch directly onto standard kernel source    "
           echo "====================================================================="
-          # 必须首先打入 4.14 专属 Baseline 补丁，让内核原生地理顺并释放完整的 susfs 文件体系
           curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.14.patch" -o susfs_to_414.patch
-          
           if [ -f "susfs_to_414.patch" ]; then
-            echo "Applying susfs_to_414.patch to establish baseline source tree..."
-            patch -p1 < susfs_to_414.patch || echo "Notice: Baseline patch set merged."
+            echo "Applying patch safely..."
+            patch -p1 < susfs_to_414.patch
           fi
 
+      - name: "STEP 2: Execute Non-GKI Syscall & VFS Injector Scripts"
+        run: |
+          cd $GITHUB_WORKSPACE
           echo "====================================================================="
-          echo "  STEP 2: Injecting Core Syscall Hook Points                         "
+          echo "  Running JackA1ltman Non-GKI Adaptation Infrastructure Scripts     "
           echo "====================================================================="
-          # 在干净的 SUSFS 基准树之上，下载并运行系统调用劫持脚本进行 Non-GKI 适配
           curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/syscall_hook_patches.sh" -o syscall_hook_patches.sh
           chmod +x syscall_hook_patches.sh
-          echo "Executing syscall_hook_patches.sh..."
-          bash syscall_hook_patches.sh || echo "Notice: Syscall infrastructure adapted."
+          bash syscall_hook_patches.sh || echo "Syscall script bypassed."
 
-          echo "====================================================================="
-          echo "  STEP 3: Executing Inline Hook VFS Adaptation Script                "
-          echo "====================================================================="
-          # 运行内联挂钩挂载脚本，精细打磨 VFS 层拦截链，配合 Step 1 避开 ReSukiSU 的不兼容警告
           curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/susfs_inline_hook_patches.sh" -o susfs_inline_hook_patches.sh
           chmod +x susfs_inline_hook_patches.sh
-          echo "Executing JackA1ltman inline patch script..."
-          bash susfs_inline_hook_patches.sh || echo "Notice: Script finished VFS tree adaptation."
+          bash susfs_inline_hook_patches.sh || echo "VFS inline script bypassed."
 
+      - name: "STEP 3: Integrate Official ReSukiSU into SUSFS-Ready Tree"
+        run: |
+          cd $GITHUB_WORKSPACE
           echo "====================================================================="
-          echo "  STEP 4: Bridging Missing SUSFS Headers for ProcFS                   "
+          echo "  Injecting ReSukiSU hooks into an already perfect SUSFS source      "
           echo "====================================================================="
-          echo "Injecting <linux/susfs.h> into proc subsystems to resolve implicit declarations..."
-          
-          # 彻底畅通 task_mmu.c 编译链路
-          if [ -f "fs/proc/task_mmu.c" ]; then
-            sed -i '1i #include <linux/susfs.h>' fs/proc/task_mmu.c
-            echo "[+] Header linked for fs/proc/task_mmu.c"
-          fi
+          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s main || curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
 
-          # 确保 cmdline 伪装无痛编译
-          if [ -f "fs/proc/cmdline.c" ]; then
-            if ! grep -q "linux/susfs.h" fs/proc/cmdline.c; then
-              sed -i '1i #include <linux/susfs.h>' fs/proc/cmdline.c
-              echo "[+] Header linked for fs/proc/cmdline.c"
-            fi
-          fi
-          
       - name: Start Kernel Compilation
         run: |
           cd $GITHUB_WORKSPACE
-          
           if [ -d "$GITHUB_WORKSPACE/toolchain/zyc-clang/bin" ]; then
             REAL_CLANG_PATH="$GITHUB_WORKSPACE/toolchain/zyc-clang/bin"
           else
             REAL_CLANG_PATH="$GITHUB_WORKSPACE/toolchain/zyc-clang"
           fi
           export PATH=$REAL_CLANG_PATH:$PATH
-          
-          # 生成原本的基础默认配置
+
           make O=out ARCH=arm64 crux_defconfig
-          
-          # 显式激活编译配置项
+
           echo "Injecting explicit config definitions using provided configuration..."
           ./scripts/config --file out/.config \
               -e KSU \
@@ -122,11 +95,9 @@ jobs:
               -e KSU_SUSFS_SUS_MAP \
               -e KSU_MULTI_MANAGER_SUPPORT
 
-          # 刷新并锁定依赖
           echo "Syncing configs via silentoldconfig..."
           make O=out ARCH=arm64 silentoldconfig
 
-          # 正式执行内核编译
           echo "Starting make process with provided configuration state..."
           make -j$(nproc --all) \
                     ARCH=arm64 \
@@ -144,22 +115,20 @@ jobs:
                     OBJCOPY=llvm-objcopy \
                     OBJDUMP=llvm-objdump \
                     STRIP=llvm-strip
-                    
+
       - name: Pack Kernel with AnyKernel3
         run: |
           cd $GITHUB_WORKSPACE
           if [ -f "out/arch/arm64/boot/Image.gz-dtb" ]; then
             echo "Kernel compiled successfully! Preparing AnyKernel3..."
-            
             BUILD_DATE=$(date -d "+8 hours" +%Y%m%d_%H%M)
             SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
             ZIP_NAME="crux-kernel-resukisu-susfs-${BUILD_DATE}-${SHORT_SHA}.zip"
-            
             echo "FINAL_ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
-            
+
             git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
             rm -rf AnyKernel3/.git AnyKernel3/README.md AnyKernel3/Image* AnyKernel3/zImage*
-            
+
             echo '# AnyKernel3 Ramdisk Mod Script' > AnyKernel3/anykernel.sh
             echo '# osm0sis @ xda-developers' >> AnyKernel3/anykernel.sh
             echo '' >> AnyKernel3/anykernel.sh
@@ -194,9 +163,8 @@ jobs:
             echo 'flash_boot;' >> AnyKernel3/anykernel.sh
             echo 'flash_dtbo;' >> AnyKernel3/anykernel.sh
             echo '## end install' >> AnyKernel3/anykernel.sh
-            
+
             cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/Image.gz-dtb
-            
             cd AnyKernel3
             zip -r ../${ZIP_NAME} *
             cd ..
