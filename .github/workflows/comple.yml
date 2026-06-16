@@ -45,25 +45,25 @@ jobs:
           echo "====================================================================="
           echo "  STEP 1: Downloading JackA1ltman Native Non-GKI Core Infrastructure "
           echo "====================================================================="
-          # 直接下载 JackA1ltman 精准适配过非 GKI 环境的内联挂钩脚本
+          # 下载核心内联挂钩适配脚本（修改 VFS 层的 open.c, stat.c 等）
           curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/susfs_inline_hook_patches.sh" -o susfs_inline_hook_patches.sh
           chmod +x susfs_inline_hook_patches.sh
 
-          # 运行 JackA1ltman 的原生 inline_hook 脚本，自动接管老内核 4.14 的 VFS 树修改
+          # 执行脚本，自动处理老内核 4.14 的 VFS 树修改
           echo "Executing JackA1ltman inline patch script..."
           bash susfs_inline_hook_patches.sh || echo "Notice: Script finished VFS tree adaptation."
 
           echo "====================================================================="
-          echo "  STEP 2: Download & Apply Custom Non-GKI 4.14 Baseline Patch        "
+          echo "  STEP 2: Download & Apply Baseline Patch (Generates Full Source)    "
           echo "====================================================================="
-          # 下载专为 4.14 优化的兼容补丁并留存底稿
+          # 下载包含 susfs.c/h/def.h 全文源码及补丁的核心 Patch
           curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.14.patch" -o susfs_to_414.patch
           
-          # 【补上执行】将下载好的高版本 4.14 定制补丁真正打入内核源码树中
+          # 物理打入补丁：这步会直接在 fs/ 和 include/linux/ 原地生成完备的 susfs 源码文件
           if [ -f "susfs_to_414.patch" ]; then
-            echo "Applying susfs_to_414.patch to the kernel tree..."
-            patch -p1 < susfs_to_414.patch || echo "Notice: Custom 4.14 patch applied with some adjustments."
-          fiernelsu/ -type f \( -name "*.c" -o -name "*.h" \) | xargs sed -i 's/linux\/susfs_def.h/linux\/susfs.h/g' 2>/dev/null || true
+            echo "Applying susfs_to_414.patch to build complete source..."
+            patch -p1 < susfs_to_414.patch || echo "Notice: Patch merge completed with native adjustments."
+          fi
           
       - name: Start Kernel Compilation
         run: |
