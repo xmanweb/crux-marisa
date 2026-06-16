@@ -82,26 +82,30 @@ jobs:
 
           echo "Compensating SUSFS failed hunks securely..."
           # =====================================================================
-          # 【第一步：修复 susfs.h 的头部声明】
-          # 引入标准头文件提供 vm_flags_t，从物理上避免任何自定义 typedef 冲突
+          # 【第一步：全面补全头文件前置声明】
+          # 引入标准头文件并前置声明 filename & stat 结构体，彻底消灭 Visibility 警告
           # =====================================================================
           if [ -f "include/linux/susfs.h" ]; then
-            sed -i '1i struct kstat;' include/linux/susfs.h
+            sed -i '1i struct kstat;\nstruct filename;\nstruct stat;' include/linux/susfs.h
             sed -i '1i #include <linux/mm_types.h>' include/linux/susfs.h
             
             # =====================================================================
-            # 【第二步：全 echo 化追加】
-            # 彻底舍弃 cat EOF，用纯粹的 echo 逐行追加，100% 免疫 YAML 缩进干扰
+            # 【第二步：无条件指针安全转换层】
+            # 放弃依赖外部无法保障的 KSU 宏，直接通过带参数宏将非标指针强转为官方标准指针。
+            # 为了防止干扰 fs/susfs.c 自身的实现，我们利用专属宏在非核心文件处进行无缝欺骗。
             # =====================================================================
-            echo "Appending conditional bridges to susfs.h via native echo..."
+            echo "Appending explicit type-casting override layer to susfs.h..."
             echo "" >> include/linux/susfs.h
-            echo "#ifdef KSU" >> include/linux/susfs.h
-            echo "#define susfs_add_sus_path(x)       susfs_add_sus_path((struct st_susfs_sus_path*)(x))" >> include/linux/susfs.h
-            echo "#define susfs_add_sus_kstat(x)      susfs_add_sus_kstat((struct st_susfs_sus_kstat*)(x))" >> include/linux/susfs.h
-            echo "#define susfs_update_sus_kstat(x)   susfs_update_sus_kstat((struct st_susfs_sus_kstat*)(x))" >> include/linux/susfs.h
-            echo "#define susfs_set_uname(x)          susfs_set_uname((struct st_susfs_uname*)(x))" >> include/linux/susfs.h
+            echo "/* ReSukiSU Non-GKI Pointer Spoofing Layer */" >> include/linux/susfs.h
+            echo "#ifndef __FS_SUSFS_C_INSIDE__" >> include/linux/susfs.h
+            echo "#define susfs_add_sus_path(x)       susfs_add_sus_path((struct st_susfs_sus_path*)(void*)(x))" >> include/linux/susfs.h
+            echo "#define susfs_add_sus_kstat(x)      susfs_add_sus_kstat((struct st_susfs_sus_kstat*)(void*)(x))" >> include/linux/susfs.h
+            echo "#define susfs_update_sus_kstat(x)   susfs_update_sus_kstat((struct st_susfs_sus_kstat*)(void*)(x))" >> include/linux/susfs.h
+            echo "#define susfs_set_uname(x)          susfs_set_uname((struct st_susfs_uname*)(void*)(x))" >> include/linux/susfs.h
             echo "#endif" >> include/linux/susfs.h
             echo "" >> include/linux/susfs.h
+            
+            # 补全 ReSukiSU 依赖的全部高级特征控制宏
             echo "#ifndef CMD_SUSFS_ADD_SUS_PATH_LOOP" >> include/linux/susfs.h
             echo "#define CMD_SUSFS_ADD_SUS_PATH_LOOP 0x55555559" >> include/linux/susfs.h
             echo "#endif" >> include/linux/susfs.h
@@ -129,6 +133,14 @@ jobs:
             echo "#ifndef CMD_SUSFS_SHOW_VERSION" >> include/linux/susfs.h
             echo "#define CMD_SUSFS_SHOW_VERSION 0x55555567" >> include/linux/susfs.h
             echo "#endif" >> include/linux/susfs.h
+          fi
+
+          # =====================================================================
+          # 【第三步：对 fs/susfs.c 本身进行宏标记隔离】
+          # 确保只有在编译官方核心 fs/susfs.c 时才会跳过强转宏，维持原生的函数契约
+          # =====================================================================
+          if [ -f "fs/susfs.c" ]; then
+            sed -i '1i #define __FS_SUSFS_C_INSIDE__' fs/susfs.c
           fi
 
           if [ -f "fs/namespace.c" ]; then
@@ -166,7 +178,6 @@ jobs:
             ln -sf ./susfs.h include/linux/susfs_def.h
           fi
           find drivers/kernelsu/ -type f \( -name "*.c" -o -name "*.h" \) | xargs sed -i 's/linux\/susfs_def.h/linux\/susfs.h/g' 2>/dev/null || true
-          
           
       - name: Start Kernel Compilation
         run: |
