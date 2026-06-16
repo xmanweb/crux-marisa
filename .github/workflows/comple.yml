@@ -91,14 +91,19 @@ jobs:
           fi
 
           # ==========================================
-          # 4. 彻底修复 kernel/sys.c 拦截点 (根据 sm8250 成功源码1:1精准复刻)
+          # 4. 彻底修复 kernel/sys.c 拦截点 (纯正则单行替换，绝无大括号)
           # ==========================================
           if [ -f "kernel/sys.c" ]; then
             echo "Executing precision 1:1 injection on kernel/sys.c..."
             if ! grep -q "susfs.h" kernel/sys.c; then sed -i '1i #include <linux/susfs.h>' kernel/sys.c; fi
             
-            # 定位到以 goto error; 结尾，且下一行为 return 0; 的精确位置，在 return 0; 前注入
-            sed -i '/goto error;/{n;/return 0;/i #ifdef CONFIG_KSU_SUSFS\n\tsusfs_set_uid_into_current_task(ruid, euid, suid);\n#endif\n}' kernel/sys.c
+            # 直接精准匹配 "goto error;" 紧跟 "return 0;" 的特征串，并在它们中间塞入代码
+            sed -i 's/goto error;\n\n\treturn 0;/goto error;\n\n#ifdef CONFIG_KSU_SUSFS\n\tsusfs_set_uid_into_current_task(ruid, euid, suid);\n#endif\n\n\treturn 0;/' kernel/sys.c
+            
+            # 如果上面的 \n 在旧版 sed 里没匹配到，用这个捕获单行 goto error; 直接后置追加作为双保险
+            if ! grep -q "susfs_set_uid_into_current_task" kernel/sys.c; then
+              sed -i '/goto error;/a \ \n#ifdef CONFIG_KSU_SUSFS\n\tsusfs_set_uid_into_current_task(ruid, euid, suid);\n#endif' kernel/sys.c
+            fi
             echo "[+] kernel/sys.c 门禁拦截完美焊入！"
           fi
 
