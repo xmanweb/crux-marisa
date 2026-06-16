@@ -84,40 +84,38 @@ jobs:
           # 【修复 1】补救 kernel/sys.c 中脱靶的 newuname 伪造
           if [ -f "kernel/sys.c" ]; then
             echo "Manually injecting failed SUSFS code into kernel/sys.c..."
-            # 注入全局外部声明
             sed -i '/SYSCALL_DEFINE1(newuname/i #ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME\nextern struct static_key_false susfs_is_uname_spoof_buffer_set;\nextern void susfs_spoof_uname(struct new_utsname* tmp);\n#endif' kernel/sys.c
-            # 注入结构体内的欺骗入口
             sed -i '/memcpy(&tmp, utsname(), sizeof(tmp));/a #ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME\n\tif (static_branch_likely(&susfs_is_uname_spoof_buffer_set))\n\t\tsusfs_spoof_uname(&tmp);\n#endif' kernel/sys.c
           fi
 
           # 【修复 2】补救 fs/namespace.c 中脱靶的 unshared mnt 绕过
           if [ -f "fs/namespace.c" ]; then
             echo "Manually injecting failed SUSFS code into fs/namespace.c..."
-            # 1. mnt_free_id 拦截
             sed -i '/int id = mnt->mnt_id;/a #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (mnt->mnt.mnt_flags & VFSMOUNT_MNT_FLAGS_KSU_UNSHARED_MNT)\n\t\treturn;\n#endif' fs/namespace.c
-            # 2. mnt_alloc_group_id 接管
             sed -i '/if (!ida_pre_get(&mnt_group_ida, GFP_KERNEL))/i #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (susfs_is_current_ksu_domain()) {\n\t\tif (!ida_pre_get(&mnt_group_ida, GFP_KERNEL))\n\t\t\treturn -ENOMEM;\n\t\tres = ida_get_new_above(&mnt_group_ida, DEFAULT_KSU_MNT_GROUP_ID, \&mnt->mnt_group_id);\n\t\tgoto bypass_orig_flow;\n\t}\n#endif' fs/namespace.c
             sed -i '/res = ida_get_new_above(&mnt_group_ida,/i #ifndef CONFIG_KSU_SUSFS_SUS_MOUNT' fs/namespace.c
             sed -i '/mnt_group_start = mnt->mnt_group_id + 1;/i #endif\nbypass_orig_flow:' fs/namespace.c
           fi
 
-          # 【修复 3】补救 fs/proc/cmdline.c 中脱靶的 cmdline 伪造
+          # 【修复 3】补救 fs/proc/cmdline.c ——【已修复大括号语法错误】
           if [ -f "fs/proc/cmdline.c" ]; then
             echo "Manually injecting failed SUSFS code into fs/proc/cmdline.c..."
+            # 1. 注入顶部声明
             sed -i '/static int cmdline_proc_show/i #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\nextern struct static_key_false susfs_is_fake_cmdline_or_bootconfig_buffer_set;\nextern void susfs_spoof_cmdline_or_bootconfig(struct seq_file *m);\n#endif' fs/proc/cmdline.c
-            sed -i '/static int cmdline_proc_show(struct seq_file \*m, void \*v)/{n;i #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\n\tif (static_branch_likely(&susfs_is_fake_cmdline_or_bootconfig_buffer_set)) {\n\t\tsusfs_spoof_cmdline_or_bootconfig(m);\n\t\tseq_printf(m, "%s\\n");\n\t\treturn 0;\n\t}\n#endif' fs/proc/cmdline.c
+            
+            # 2. 定位到函数开头的第一个 {，并利用绝对行号精准注入拦截逻辑
+            CMDLINE_LN=$(grep -n -A 2 "static int cmdline_proc_show" fs/proc/cmdline.c | grep "{" | head -n 1 | cut -d: -f1)
+            if [ ! -z "$CMDLINE_LN" ]; then
+              echo "cmdline_proc_show brace found at line: $CMDLINE_LN"
+              sed -i "${CMDLINE_LN}a #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\n\tif (static_branch_likely(&susfs_is_fake_cmdline_or_bootconfig_buffer_set)) {\n\t\tsusfs_spoof_cmdline_or_bootconfig(m);\n\t\tseq_printf(m, \"%s\\\\n\");\n\t\treturn 0;\n\t}\n#endif" fs/proc/cmdline.c
+            fi
           fi
 
           # 【修复 4】全面抢救 fs/proc/task_mmu.c 中脱靶的 show_smap 与头文件引用
           if [ -f "fs/proc/task_mmu.c" ]; then
             echo "Manually injecting failed SUSFS code into fs/proc/task_mmu.c..."
-            # 注入头文件
             sed -i '/#include <linux\/uaccess.h>/i #if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)\n#include <linux/susfs.h>\n#endif' fs/proc/task_mmu.c
-            
-            # 注入第一段：if (!rollup_mode) 处拦截
             sed -i '/if (!rollup_mode)/a #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tif (vma->vm_file) {\n\t\tif (SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n\t\t\treturn 0;\n\t}\n#endif' fs/proc/task_mmu.c
-
-            # 注入第二段：arch_show_smap(m, vma); 前拦截并跳转
             sed -i '/arch_show_smap(m, vma);/i #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tif (vma->vm_file) {\n\t\tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n\t\t\tgoto bypass_orig_flow;\n\t}\n#endif' fs/proc/task_mmu.c
             sed -i '/m_cache_vma(m, vma);/i #ifdef CONFIG_KSU_SUSFS_SUS_MAP\nbypass_orig_flow:\n#endif' fs/proc/task_mmu.c
           fi
