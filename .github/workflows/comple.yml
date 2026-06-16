@@ -112,28 +112,28 @@ jobs:
           export PATH=$REAL_CLANG_PATH:$PATH
 
           # =====================================================================
-          # 【无视任何转义的稳健注入】完全隔离变量与单引号，绝不给 Bash 留错判空间
+          # 【精准单行限定注入】增加 head -n 1，彻底解决多行匹配导致的 sed 崩溃
           # =====================================================================
-          echo "Modifying drivers/input/input.c using watertight single-quote isolation..."
+          echo "Modifying drivers/input/input.c safely with clean single-line variables..."
           
           if [ -f "drivers/input/input.c" ]; then
-            # 1. 动态计算大括号精确行号
-            BRACE_LINE=$(grep -n "void input_event" drivers/input/input.c | cut -d: -f1)
+            # 1. 获取 void input_event 定义起点的行号（确保只取第一个匹配）
+            BRACE_LINE=$(grep -n "void input_event" drivers/input/input.c | head -n 1 | cut -d: -f1)
+            
+            # 2. 从函数起点向后寻找第一个左大括号 `{` 的行号
             TARGET_OFFSET=$(tail -n +$BRACE_LINE drivers/input/input.c | grep -n "{" | head -n 1 | cut -d: -f1)
             REAL_INJECT_LINE=$((BRACE_LINE + TARGET_OFFSET - 1))
-            echo "Brace line found at: $REAL_INJECT_LINE"
+            echo "Clean brace line locked at: $REAL_INJECT_LINE"
             
-            # 2. 将行号彻底抽离到单引号外面拼接，内部代码完全用纯单引号包裹，防任何符号被 Bash 转义
-            sed -i ''"$REAL_INJECT_LINE"'s@{ @{ extern bool ksu_input_hook __read_mostly; extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value); @g' drivers/input/input.c
-
-            # 3. 动态获取挂钩锚点行号
-            ANCHOR_LINE=$(grep -n "if (is_event_supported(type, dev->evbit, EV_MAX)) {" drivers/input/input.c | cut -d: -f1)
-            echo "Anchor line found at: $ANCHOR_LINE"
+            # 3. 提取拦截点 if (is_event_supported... 的行号，必须加 head -n 1 杜绝 444 和 471 并存的多行脏数据
+            ANCHOR_LINE=$(grep -n "if (is_event_supported" drivers/input/input.c | head -n 1 | cut -d: -f1)
+            echo "Clean anchor line locked at: $ANCHOR_LINE"
             
-            # 4. 同样将锚点行号抽离，并在单引号内通过 \x26 转义地址符 &，防 sed 展开语义
-            sed -i ''"$ANCHOR_LINE"'s@{ @{ if (unlikely(ksu_input_hook)) ksu_handle_input_handle_event(\x26type, \x26code, \x26value); @g' drivers/input/input.c
+            # 4. 执行安全的外部变量拼接替换。通过用 \x26 代替 &，完美生成极其纯净的内联 Hook 代码
+            sed -i "${REAL_INJECT_LINE}s@{ @{ extern bool ksu_input_hook __read_mostly; extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value); @g" drivers/input/input.c
+            sed -i "${ANCHOR_LINE}s@{ @{ if (unlikely(ksu_input_hook)) ksu_handle_input_handle_event(\x26type, \x26code, \x26value); @g" drivers/input/input.c
             
-            echo "drivers/input/input.c inline injection verified successfully."
+            echo "drivers/input/input.c hook injection accomplished cleanly."
           fi
 
           # =====================================================================
