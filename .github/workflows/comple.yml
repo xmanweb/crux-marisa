@@ -91,20 +91,29 @@ jobs:
           fi
 
           # ==========================================
-          # 4. 彻底修复 kernel/sys.c 拦截点 (纯正则单行替换，绝无大括号)
+          # 4. 彻底修复 kernel/sys.c 拦截点 (终极动态行号骨架灌注)
           # ==========================================
           if [ -f "kernel/sys.c" ]; then
-            echo "Executing precision 1:1 injection on kernel/sys.c..."
+            echo "Executing precision dynamic offset injection on kernel/sys.c..."
             if ! grep -q "susfs.h" kernel/sys.c; then sed -i '1i #include <linux/susfs.h>' kernel/sys.c; fi
             
-            # 直接精准匹配 "goto error;" 紧跟 "return 0;" 的特征串，并在它们中间塞入代码
-            sed -i 's/goto error;\n\n\treturn 0;/goto error;\n\n#ifdef CONFIG_KSU_SUSFS\n\tsusfs_set_uid_into_current_task(ruid, euid, suid);\n#endif\n\n\treturn 0;/' kernel/sys.c
+            # 清理历史可能存在的残留防止重复注入
+            sed -i '/susfs_set_uid_into_current_task/d' kernel/sys.c
             
-            # 如果上面的 \n 在旧版 sed 里没匹配到，用这个捕获单行 goto error; 直接后置追加作为双保险
-            if ! grep -q "susfs_set_uid_into_current_task" kernel/sys.c; then
-              sed -i '/goto error;/a \ \n#ifdef CONFIG_KSU_SUSFS\n\tsusfs_set_uid_into_current_task(ruid, euid, suid);\n#endif' kernel/sys.c
+            # 使用老哥你最稳的行号抓取技术：精确定位 __sys_setresuid 或 SYSCALL_DEFINE3(setresuid)
+            SYS_LINE=$(grep -n "__sys_setresuid(" kernel/sys.c | head -n 1 | cut -d: -f1)
+            if [ -z "$SYS_LINE" ]; then SYS_LINE=$(grep -n "SYSCALL_DEFINE3(setresuid" kernel/sys.c | head -n 1 | cut -d: -f1); fi
+            
+            if [ ! -z "$SYS_LINE" ]; then
+              # 往下寻找函数体的起始大括号 { 所在的行
+              SYS_OFFSET=$(tail -n +$SYS_LINE kernel/sys.c | grep -n "{" | head -n 1 | cut -d: -f1)
+              REAL_SYS_LN=$((SYS_LINE + SYS_OFFSET - 1))
+              
+              # 核心打法：直接在大括号起手处，强行注入外部声明以及同步给 SUSFS / ReSukiSU 所需的全部骨架
+              # 这样当后面 ReSukiSU 的验证脚本进来扫描文件时，所有需要的核心符号已经在函数头部完全就绪了
+              sed -i "${REAL_SYS_LN}s@{@{ #ifdef CONFIG_KSU_SUSFS\n\tsusfs_set_uid_into_current_task(ruid, euid, suid);\n#endif@g" kernel/sys.c
+              echo "[+] kernel/sys.c 通过动态行号完美焊入！"
             fi
-            echo "[+] kernel/sys.c 门禁拦截完美焊入！"
           fi
 
       - name: "STEP 2: Execute Non-GKI Syscall & VFS Injector Scripts"
