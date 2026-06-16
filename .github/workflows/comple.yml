@@ -91,13 +91,15 @@ jobs:
           fi
 
           # ==========================================
-          # 4. 完美修复 kernel/sys.c
+          # 4. 彻底修复 kernel/sys.c 拦截点 (根据 sm8250 成功源码1:1精准复刻)
           # ==========================================
           if [ -f "kernel/sys.c" ]; then
-            echo "Modifying kernel/sys.c..."
-            sed -i '1i #include <linux/susfs.h>' kernel/sys.c
-            sed -i '/out:/i #ifdef CONFIG_KSU_SUSFS\n\tsusfs_set_uid_into_current_task(ruid, euid, suid);\n#endif' kernel/sys.c
-            echo "[+] kernel/sys.c 拦截点注入成功！"
+            echo "Executing precision 1:1 injection on kernel/sys.c..."
+            if ! grep -q "susfs.h" kernel/sys.c; then sed -i '1i #include <linux/susfs.h>' kernel/sys.c; fi
+            
+            # 定位到 if (error) goto error; 并且下一行是 return 0; 的唯一区间，在它们中间强行插入
+            sed -i '/if (error)/{n;/goto error;/{n;/return 0;/i #ifdef CONFIG_KSU_SUSFS\n\tsusfs_set_uid_into_current_task(ruid, euid, suid);\n#endif\n;}}' kernel/sys.c
+            echo "[+] kernel/sys.c 门禁拦截完美焊入！"
           fi
 
       - name: "STEP 2: Execute Non-GKI Syscall & VFS Injector Scripts"
