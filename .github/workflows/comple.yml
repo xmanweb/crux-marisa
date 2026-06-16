@@ -91,31 +91,29 @@ jobs:
           fi
 
           # ==========================================
-          # 4. 彻底修复 kernel/sys.c 拦截点 (终极动态行号骨架灌注)
+          # 4. 彻底修复 kernel/sys.c 拦截点 (扁平化无损精准注入)
           # ==========================================
           if [ -f "kernel/sys.c" ]; then
-            echo "Executing precision dynamic offset injection on kernel/sys.c..."
+            echo "Executing dimensional attack on kernel/sys.c..."
+            # 1. 确保头文件在第一行
             if ! grep -q "susfs.h" kernel/sys.c; then sed -i '1i #include <linux/susfs.h>' kernel/sys.c; fi
             
-            # 清理历史可能存在的残留防止重复注入
+            # 2. 清理历史可能存在的残留
             sed -i '/susfs_set_uid_into_current_task/d' kernel/sys.c
             
-            # 使用老哥你最稳的行号抓取技术：精确定位 __sys_setresuid 或 SYSCALL_DEFINE3(setresuid)
-            SYS_LINE=$(grep -n "__sys_setresuid(" kernel/sys.c | head -n 1 | cut -d: -f1)
-            if [ -z "$SYS_LINE" ]; then SYS_LINE=$(grep -n "SYSCALL_DEFINE3(setresuid" kernel/sys.c | head -n 1 | cut -d: -f1); fi
+            # 3. 乾坤大挪移：将换行符临时转为 @，完成绝对精准的跨行无痛替换，再还原换行
+            tr '\n' '@' < kernel/sys.c > kernel/sys.c.tmp
             
-            if [ ! -z "$SYS_LINE" ]; then
-              # 往下寻找函数体的起始大括号 { 所在的行
-              SYS_OFFSET=$(tail -n +$SYS_LINE kernel/sys.c | grep -n "{" | head -n 1 | cut -d: -f1)
-              REAL_SYS_LN=$((SYS_LINE + SYS_OFFSET - 1))
-              
-              # 核心打法：直接在大括号起手处，强行注入外部声明以及同步给 SUSFS / ReSukiSU 所需的全部骨架
-              # 这样当后面 ReSukiSU 的验证脚本进来扫描文件时，所有需要的核心符号已经在函数头部完全就绪了
-              sed -i "${REAL_SYS_LN}s@{@{ #ifdef CONFIG_KSU_SUSFS\n\tsusfs_set_uid_into_current_task(ruid, euid, suid);\n#endif@g" kernel/sys.c
-              echo "[+] kernel/sys.c 通过动态行号完美焊入！"
-            fi
+            # 匹配 goto error;[换行][换行][制表符]return 0; 并原汁原味地在 return 0 前面焊入 SUSFS 宏块
+            sed -i 's/goto error;@@\treturn 0;/goto error;@@#ifdef CONFIG_KSU_SUSFS@\tsusfs_set_uid_into_current_task(ruid, euid, suid);@#endif@@\treturn 0;/' kernel/sys.c.tmp
+            
+            # 还原换行符
+            tr '@' '\n' < kernel/sys.c.tmp > kernel/sys.c
+            rm -f kernel/sys.c.tmp
+            
+            echo "[+] kernel/sys.c 扁平化注入手术彻底圆满完成！"
           fi
-
+          
       - name: "STEP 2: Execute Non-GKI Syscall & VFS Injector Scripts"
         run: |
           cd $GITHUB_WORKSPACE
