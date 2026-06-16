@@ -53,55 +53,51 @@ jobs:
           echo "====================================================================="
           
           # ==========================================
-          # 1. 完美修复 fs/namespace.c (全部 3 处修改 - 严格单行 sed)
+          # 1. 完美修复 fs/namespace.c (全部 3 处修改)
           # ==========================================
           if [ -f "fs/namespace.c" ]; then
             echo "Repairing fs/namespace.c (3 Hunks)..."
             sed -i '1i #include <linux/susfs.h>' fs/namespace.c
-            
-            # 【第 1 处】：补充外部声明锚点
             sed -i '/static int mnt_alloc_group_id/i extern int mnt_already_visible(struct vfsmount *mnt, bool *get_next_mnt);' fs/namespace.c
             
-            # 【第 2, 3 处】：在 show_vfsmnt 和 show_mountinfo 函数体内精准单行注入隐藏拦截逻辑
-            sed -i '/struct mount \*mnt = real_mount(v);/a '"$'\n'"'#ifdef CONFIG_KSU_SUSFS'"$'\n\t''if (likely(check_is_mnt_devname_susfs_stat)) {'"$'\n\t\t''bool get_next_mnt = false;'"$'\n\t\t''if (mnt_already_visible(&mnt->mnt, &get_next_mnt)) {'"$'\n\t\t\t''if (get_next_mnt) return 0;'"$'\n\t\t''}'"$'\n\t''}'"$'\n''#endif' fs/namespace.c
-            
+            # 使用标准的 \n 逃逸符在单行完成挂载隐藏逻辑注入
+            sed -i '/struct mount \*mnt = real_mount(v);/a #ifdef CONFIG_KSU_SUSFS\n\tif (likely(check_is_mnt_devname_susfs_stat)) {\n\t\tbool get_next_mnt = false;\n\t\tif (mnt_already_visible(&mnt->mnt, &get_next_mnt)) {\n\t\t\tif (get_next_mnt) return 0;\n\t\t}\n\t}\n#endif' fs/namespace.c
             echo "[+] fs/namespace.c 所有 3 处隐藏拦截点注入完毕！"
           fi
 
           # ==========================================
-          # 2. 完美修复 fs/proc/task_mmu.c (全部 4 处修改 - 严格单行 sed)
+          # 2. 完美修复 fs/proc/task_mmu.c (全部 4 处修改)
           # ==========================================
           if [ -f "fs/proc/task_mmu.c" ]; then
             echo "Repairing fs/proc/task_mmu.c (4 Hunks)..."
             sed -i '1i #include <linux/susfs.h>' fs/proc/task_mmu.c
             
-            # 兼容标准写法：捕获 struct file *file = vma->vm_file; 并在其后进行单行代码段插桩
-            sed -i '/struct file \*file = vma->vm_file;/a '"$'\n''#ifdef CONFIG_KSU_SUSFS_SUS_MAP'"$'\n\t''struct file *susfs_spoof_file = NULL;'"$'\n\t''if (unlikely(susfs_is_vma_file_sus_maps(vma))) {'"$'\n\t\t''susfs_spoof_file = susfs_get_spoof_file_vma(vma);'"$'\n\t\t''if (susfs_spoof_file) {'"$'\n\t\t\t''file = susfs_spoof_file;'"$'\n\t\t''}'"$'\n\t''}'"$'\n''#endif' fs/proc/task_mmu.c
+            # 针对带 struct 前缀的代码行后面插桩
+            sed -i '/struct file \*file = vma->vm_file;/a #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tstruct file *susfs_spoof_file = NULL;\n\tif (unlikely(susfs_is_vma_file_sus_maps(vma))) {\n\t\tsusfs_spoof_file = susfs_get_spoof_file_vma(vma);\n\t\tif (susfs_spoof_file) {\n\t\t\tfile = susfs_spoof_file;\n\t\t}\n\t}\n#endif' fs/proc/task_mmu.c
             
-            # 兼容非标准/厂商简写：捕获 file = vma->vm_file; (排除带 struct 的行避免重复匹配)
-            sed -i '/[^t]file = vma->vm_file;/a '"$'\n''#ifdef CONFIG_KSU_SUSFS_SUS_MAP'"$'\n\t''struct file *susfs_spoof_file = NULL;'"$'\n\t''if (unlikely(susfs_is_vma_file_sus_maps(vma))) {'"$'\n\t\t''susfs_spoof_file = susfs_get_spoof_file_vma(vma);'"$'\n\t\t''if (susfs_spoof_file) {'"$'\n\t\t\t''file = susfs_spoof_file;'"$'\n\t\t''}'"$'\n\t''}'"$'\n''#endif' fs/proc/task_mmu.c
-            
-            echo "[+] fs/proc/task_mmu.c 的 maps/smaps/numa_maps 等 4 处伪装点全部焊死！"
+            # 针对不带 struct 前缀的代码行后面插桩
+            sed -i '/[^t]file = vma->vm_file;/a #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tstruct file *susfs_spoof_file = NULL;\n\tif (unlikely(susfs_is_vma_file_sus_maps(vma))) {\n\t\tsusfs_spoof_file = susfs_get_spoof_file_vma(vma);\n\t\tif (susfs_spoof_file) {\n\t\t\tfile = susfs_spoof_file;\n\t\t}\n\t}\n#endif' fs/proc/task_mmu.c
+            echo "[+] fs/proc/task_mmu.c 的 4 处伪装点全部焊死！"
           fi
 
           # ==========================================
-          # 3. 完美修复 fs/proc/cmdline.c (严格单行 sed)
+          # 3. 完美修复 fs/proc/cmdline.c
           # ==========================================
           if [ -f "fs/proc/cmdline.c" ]; then
             echo "Modifying fs/proc/cmdline.c..."
             sed -i '1i #include <linux/susfs.h>' fs/proc/cmdline.c
-            sed -i '/saved_command_line/i '"$'\n''#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG'"$'\n\t''if (susfs_spoof_cmdline_or_bootconfig) {'"$'\n\t\t''seq_printf(m, "%s\\n", susfs_cmdline_or_bootconfig);'"$'\n\t\t''return 0;'"$'\n\t''}'"$'\n''#endif' fs/proc/cmdline.c
-            echo "[+] fs/proc/cmdline.c 局部单行注入成功！"
+            sed -i '/saved_command_line/i #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\n\tif (susfs_spoof_cmdline_or_bootconfig) {\n\t\tseq_printf(m, "%s\\n", susfs_cmdline_or_bootconfig);\n\t\treturn 0;\n\t}\n#endif' fs/proc/cmdline.c
+            echo "[+] fs/proc/cmdline.c 局部注入成功！"
           fi
 
           # ==========================================
-          # 4. 完美修复 kernel/sys.c (严格单行 sed)
+          # 4. 完美修复 kernel/sys.c
           # ==========================================
           if [ -f "kernel/sys.c" ]; then
             echo "Modifying kernel/sys.c..."
             sed -i '1i #include <linux/susfs.h>' kernel/sys.c
-            sed -i '/out:/i '"$'\n''#ifdef CONFIG_KSU_SUSFS'"$'\n\t''susfs_set_uid_into_current_task(ruid, euid, suid);'"$'\n''#endif' kernel/sys.c
-            echo "[+] kernel/sys.c 拦截点单行焊入成功！"
+            sed -i '/out:/i #ifdef CONFIG_KSU_SUSFS\n\tsusfs_set_uid_into_current_task(ruid, euid, suid);\n#endif' kernel/sys.c
+            echo "[+] kernel/sys.c 拦截点注入成功！"
           fi
 
       - name: "STEP 2: Execute Non-GKI Syscall & VFS Injector Scripts"
