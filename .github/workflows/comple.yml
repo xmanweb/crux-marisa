@@ -199,7 +199,7 @@ jobs:
           # 生成 crux 默认配置
           make O=out ARCH=arm64 crux_defconfig
           
-          # 激活编译配置项
+          # 激活编译配置项 (-e BUILD_ARM64_DT_OVERLAY 确保编译生成 dtbo.img)
           ./scripts/config --file out/.config \
               -e KSU \
               -e THREAD_INFO_IN_TASK \
@@ -213,7 +213,8 @@ jobs:
               -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
               -e KSU_SUSFS_OPEN_REDIRECT \
               -e KSU_SUSFS_SUS_MAP \
-              -e KSU_MULTI_MANAGER_SUPPORT
+              -e KSU_MULTI_MANAGER_SUPPORT \
+              -e BUILD_ARM64_DT_OVERLAY
 
           make O=out ARCH=arm64 silentoldconfig
 
@@ -235,7 +236,7 @@ jobs:
                       OBJDUMP=llvm-objdump \
                       STRIP=llvm-strip
                       
-      - name: Pack Kernel with AnyKernel3 (Dual Output)
+      - name: Pack Kernel with AnyKernel3 (Dual Output with DTBO)
         run: |
           cd $GITHUB_WORKSPACE
           echo "Preparing AnyKernel3 Dual Track Workspace..."
@@ -279,24 +280,34 @@ jobs:
               echo 'flash_dtbo;' >> "$target_script"
             else
               echo '# flash_dtbo;' >> "$target_script"
-            
+            fi
+          }
+          
           define_properties "ak3_with_dtb/anykernel.sh" "With-DTB"
           define_properties "ak3_no_dtb/anykernel.sh" "No-DTB"
 
           # =====================================================================
-          # 精准分发内核核心体 (向你之前的完美分流机制致敬)
+          # 精准分发内核核心体 & DTBO 
           # =====================================================================
           echo "Distributing kernel artifacts to dual tracks..."
           
-          # A. 带 DTB 轨：直接装填编译链内嵌的完整 Image.gz-dtb
+          # A. 带 DTB 轨：装填 Image.gz-dtb 以及强制捕获的 dtbo.img
           if [ -f "out/arch/arm64/boot/Image.gz-dtb" ]; then
             cp out/arch/arm64/boot/Image.gz-dtb ak3_with_dtb/Image.gz-dtb
             echo "Image.gz-dtb deployed cleanly to With-DTB track."
           else
             echo "Error: Image.gz-dtb missing!" && exit 1
           fi
+          
+          # 【新增重点】：捕获编译树里的 dtbo.img 并填入 With-DTB 包中
+          if [ -f "out/arch/arm64/boot/dtbo.img" ]; then
+            cp out/arch/arm64/boot/dtbo.img ak3_with_dtb/dtbo.img
+            echo "Success: dtbo.img detected and embedded into With-DTB package."
+          else
+            echo "Warning: dtbo.img not found in build output. flash_dtbo will be skipped dynamically by AK3."
+          fi
 
-          # B. 不带 DTB 轨：抓取最原始核心体手动 gzip，杜绝任何 Makefile 隐含的 dtb 尾巴
+          # B. 不带 DTB 轨：抓取最原始核心体手动 gzip，彻底不混入任何 dtb 尾巴和 dtbo.img
           if [ -f "out/arch/arm64/boot/Image" ]; then
             gzip -c out/arch/arm64/boot/Image > ak3_no_dtb/Image.gz
             echo "Pure Image.gz successfully squashed for No-DTB track."
