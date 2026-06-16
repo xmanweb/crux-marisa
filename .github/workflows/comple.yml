@@ -39,13 +39,14 @@ jobs:
           echo "Integrating Official ReSukiSU..."
           curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s main || curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
 
-      - name: Integrate Simonpunk SUSFS v2.1.0
+      - name: Integrate Simonpunk SUSFS v2.1.x (Master Branch)
         run: |
           cd $GITHUB_WORKSPACE
-          echo "Cloning official simonpunk/susfs4ksu repository (kernel-4.14)..."
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b kernel-4.14 --depth=1 susfs_src
+          # 【核心修正】放弃旧分支，直接克隆官方包含最新 v2.1.x 架构的 master 分支
+          echo "Cloning official simonpunk/susfs4ksu repository (master branch)..."
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b master --depth=1 susfs_src
           
-          echo "Distributing SUSFS core file structure to kernel..."
+          echo "Distributing latest SUSFS core file structure to kernel..."
           if [ -d "susfs_src/kernel_patches/fs" ]; then
             cp -r susfs_src/kernel_patches/fs/* ./fs/
           fi
@@ -56,7 +57,6 @@ jobs:
           echo "Modifying ReSukiSU source files to bypass Kprobes entirely..."
           find KernelSU/ -type f \( -name "*.c" -o -name "*.h" \) | xargs sed -i 's/#ifdef CONFIG_KPROBES/#if defined(CONFIG_KPROBES) \&\& 0/g'
 
-          # 【核心防御】直接用 echo 物理清空阻断检测脚本，使其彻底失效
           echo "Neutralizing strict inline hook check script..."
           if [ -f "KernelSU/kernel/tools/inline_hook_check.mk" ]; then
             echo "all:" > KernelSU/kernel/tools/inline_hook_check.mk
@@ -72,15 +72,15 @@ jobs:
             sed -i 's/pid_t				pid;/pid_t				pid;\n#ifdef CONFIG_SUSFS\n	u64				susfs_state;\n#endif/g' include/linux/sched.h
           fi
 
-          echo "Applying 50_add_susfs_in_kernel-4.14.patch to VFS layer..."
-          PATCH_FILE=$(find susfs_src/kernel_patches/ -name "50_add_susfs_in_kernel-4.14*.patch" | head -n 1)
+          # 【精准路径】使用 master 分支下对应 4.14 内核的最新 2.1.x 补丁
+          echo "Applying latest 50_add_susfs_in_kernel-4.14.patch to VFS layer..."
+          PATCH_FILE="susfs_src/kernel_patches/50_add_susfs_in_kernel-4.14.patch"
           if [ -f "$PATCH_FILE" ]; then
-            echo "Found official VFS patch: $PATCH_FILE"
-            patch -p1 < "$PATCH_FILE" || echo "Notice: Standard partial failed hunks will be compensated cleanly below."
+            echo "Found master branch VFS patch: $PATCH_FILE"
+            patch -p1 < "$PATCH_FILE" || echo "Notice: Partials handled cleanly below."
           fi
 
           echo "Compensating SUSFS failed hunks securely..."
-          # 1. 解决 struct kstat 作用域警告
           if [ -f "include/linux/susfs.h" ]; then
             sed -i '1i struct kstat;' include/linux/susfs.h
           fi
@@ -88,14 +88,12 @@ jobs:
           if [ -f "fs/namespace.c" ]; then
             sed -i '1i #include <linux/susfs.h>' fs/namespace.c
             
-            # 【核心修复】如果官方补丁已经写入了带 mnt_id_lock 的代码，直接用 sed 物理抹除这两行锁操作
             echo "Removing literal mnt_id_lock references from fs/namespace.c..."
             sed -i '/spin_lock(&mnt_id_lock);/d' fs/namespace.c
             sed -i '/spin_unlock(&mnt_id_lock);/d' fs/namespace.c
             sed -i '/spin_lock(&mnt_id_lock)/d' fs/namespace.c
             sed -i '/spin_unlock(&mnt_id_lock)/d' fs/namespace.c
 
-            # 如果文件中压根没有 mnt_is_susfs 函数（补丁完全失败的情况），我们再全新注入无锁版本
             if ! grep -q "bool mnt_is_susfs" fs/namespace.c; then
               echo "Injecting clean fallback mnt_is_susfs..."
               sed -i '/static inline inline_mnt/i #ifdef CONFIG_SUSFS\nbool mnt_is_susfs(struct vfsmount *mnt) { if (!mnt) return false; return (mnt->mnt_flags \& MNT_SUSFS); }\n#endif\n' fs/namespace.c
@@ -107,13 +105,18 @@ jobs:
           fi
 
           if [ -f "fs/proc/task_mmu.c" ]; then
-            # 保证取地址符 \x26 安全落盘，不破坏原本的 show_map_vma
             sed -i 's/show_map_vma(m, vma, is_pid);/#ifdef CONFIG_SUSFS\n\tif (vma->vm_file \&\& vma->vm_file->f_path.mnt \&\& mnt_is_susfs(vma->vm_file->f_path.mnt)) { return 0; }\n#endif\n\tshow_map_vma(m, vma, is_pid);/g' fs/proc/task_mmu.c
           fi
 
           if [ -f "kernel/sys.c" ]; then
             sed -i '1i #include <linux/susfs.h>' kernel/sys.c
             sed -i 's/switch (option) {/switch (option) {\n#ifdef CONFIG_SUSFS\n\tcase PR_SUSFS_GET_VERSION: return susfs_get_version((unsigned long __user *)arg2);\n\tcase PR_SUSFS_SET_STATUS: return susfs_set_status(arg2, (unsigned long __user *)arg3);\n#endif/g' kernel/sys.c
+          fi
+
+          # 【干净利落】仅引入头文件，让 dispatch.c 自动读取最新的原生 2.1.x 宏定义，彻底拿掉临时的手写硬编码
+          echo "Linking susfs header into KernelSU dispatch..."
+          if [ -f "drivers/kernelsu/supercall/dispatch.c" ]; then
+            sed -i '1i #include <linux/susfs.h>' drivers/kernelsu/supercall/dispatch.c
           fi
 
       - name: Start Kernel Compilation
