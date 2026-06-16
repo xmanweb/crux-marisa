@@ -46,19 +46,23 @@ jobs:
             patch -p1 < susfs_to_414.patch || echo "Notice: Baseline patch finished with some offset/hunk adjustments."
           fi
 
-          echo "====================================================================="
-          echo "  STEP 2: Apply JackA1ltman Native Non-GKI Core Infrastructure       "
-          echo "====================================================================="
-          curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/susfs_inline_hook_patches.sh" -o susfs_inline_hook_patches.sh
-          chmod +x susfs_inline_hook_patches.sh
-          echo "Executing JackA1ltman inline patch script..."
-          bash susfs_inline_hook_patches.sh || echo "Notice: VFS tree adaptation finished."
-
       - name: "PHASE 2: Integrate Official ReSukiSU"
         run: |
           cd $GITHUB_WORKSPACE
           echo "Integrating Official ReSukiSU environment..."
           curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s main || curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
+
+      - name: "PHASE 3: Apply JackA1ltman Native Non-GKI Core Infrastructure"
+        run: |
+          cd $GITHUB_WORKSPACE
+          echo "====================================================================="
+          echo "  STEP 1: Download & Execute JackA1ltman Inline Hook Script         "
+          echo "====================================================================="
+          # 在 ReSukiSU 释放出 KernelSU 源码后，再让此脚本去扫 drivers/kernelsu/
+          curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/susfs_inline_hook_patches.sh" -o susfs_inline_hook_patches.sh
+          chmod +x susfs_inline_hook_patches.sh
+          echo "Executing JackA1ltman inline patch script..."
+          bash susfs_inline_hook_patches.sh || echo "Notice: VFS tree and KernelSU adaptation finished."
           
           # 修复原本脚本的拼写碎裂错误
           find drivers/Kconfig KernelSU/ -type f \( -name "*.c" -o -name "*.h" \) | xargs sed -i 's/linux\/susfs_def.h/linux\/susfs.h/g' 2>/dev/null || true
@@ -75,15 +79,7 @@ jobs:
           export PATH=$REAL_CLANG_PATH:$PATH
 
           # =====================================================================
-          # 【防御性摧毁检查机制】杜绝 inline_hook_check.mk 的硬性报错拦截
-          # =====================================================================
-          if [ -f "KernelSU/kernel/tools/inline_hook_check.mk" ]; then
-            echo "Neutralizing ReSukiSU compilation killer check safely..."
-            sed -i 's/\$(error/\$(warning/g' KernelSU/kernel/tools/inline_hook_check.mk
-          fi
-
-          # =====================================================================
-          # "PHASE 3: Precision Hook Injection"
+          # "PHASE 4: Precision Hook Injection"
           # =====================================================================
           echo "Modifying drivers/input/input.c safely with clean single-line variables..."
           if [ -f "drivers/input/input.c" ]; then
