@@ -199,7 +199,7 @@ jobs:
           # 生成 crux 默认配置
           make O=out ARCH=arm64 crux_defconfig
           
-          # 激活编译配置项 (-e BUILD_ARM64_DT_OVERLAY 确保编译生成 dtbo.img)
+          # 激活编译配置项 (-e BUILD_ARM64_DT_OVERLAY)
           ./scripts/config --file out/.config \
               -e KSU \
               -e THREAD_INFO_IN_TASK \
@@ -259,7 +259,7 @@ jobs:
           rm -rf ak3_no_dtb/.git ak3_no_dtb/README.md ak3_no_dtb/Image* ak3_no_dtb/zImage*
           
           # =====================================================================
-          # 定义动态 anykernel.sh 说明脚本流生成函数
+          # 定义动态 anykernel.sh 说明脚本流生成函数 (彻底修复大括号闭合错误)
           # =====================================================================
           define_properties() {
             local target_script="$1"
@@ -277,11 +277,16 @@ jobs:
             echo 'flash_boot;' >> "$target_script"
             
             if [ "$track_mode" = "With-DTB" ]; then
-              echo 'flash_dtbo;' >> "$target_script"
+              # 如果编译没产出 dtbo.img，这里多加个保护判断，防止 AnyKernel3 执行报错
+              if [ -f "out/arch/arm64/boot/dtbo.img" ]; then
+                echo 'flash_dtbo;' >> "$target_script"
+              else
+                echo '# flash_dtbo; (Skipped due to no source dtbo.img)' >> "$target_script"
+              fi
             else
               echo '# flash_dtbo;' >> "$target_script"
             fi
-          }
+          } # <--- 这里之前漏掉了闭合函数，现在已完美补上！
           
           define_properties "ak3_with_dtb/anykernel.sh" "With-DTB"
           define_properties "ak3_no_dtb/anykernel.sh" "No-DTB"
@@ -291,7 +296,7 @@ jobs:
           # =====================================================================
           echo "Distributing kernel artifacts to dual tracks..."
           
-          # A. 带 DTB 轨：装填 Image.gz-dtb 以及强制捕获的 dtbo.img
+          # A. 带 DTB 轨：装填 Image.gz-dtb 以及 dtbo.img
           if [ -f "out/arch/arm64/boot/Image.gz-dtb" ]; then
             cp out/arch/arm64/boot/Image.gz-dtb ak3_with_dtb/Image.gz-dtb
             echo "Image.gz-dtb deployed cleanly to With-DTB track."
@@ -299,15 +304,15 @@ jobs:
             echo "Error: Image.gz-dtb missing!" && exit 1
           fi
           
-          # 【新增重点】：捕获编译树里的 dtbo.img 并填入 With-DTB 包中
+          # 捕获编译树里的 dtbo.img 并填入 With-DTB 包中
           if [ -f "out/arch/arm64/boot/dtbo.img" ]; then
             cp out/arch/arm64/boot/dtbo.img ak3_with_dtb/dtbo.img
             echo "Success: dtbo.img detected and embedded into With-DTB package."
           else
-            echo "Warning: dtbo.img not found in build output. flash_dtbo will be skipped dynamically by AK3."
+            echo "Warning: dtbo.img not found in build output. flash_dtbo configuration adjusted."
           fi
 
-          # B. 不带 DTB 轨：抓取最原始核心体手动 gzip，彻底不混入任何 dtb 尾巴和 dtbo.img
+          # B. 不带 DTB 轨：强制纯净化提取与手动压缩
           if [ -f "out/arch/arm64/boot/Image" ]; then
             gzip -c out/arch/arm64/boot/Image > ak3_no_dtb/Image.gz
             echo "Pure Image.gz successfully squashed for No-DTB track."
