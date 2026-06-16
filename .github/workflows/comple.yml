@@ -44,49 +44,46 @@ jobs:
           cd $GITHUB_WORKSPACE
           
           echo "====================================================================="
-          echo "  STEP 1: Injecting Core Syscall Hook Points (The Foundation)       "
+          echo "  STEP 1: Download & Apply Baseline Patch First (Generate Source)   "
           echo "====================================================================="
-          # 下载并运行系统调用劫持点脚本，物理改造原生系统调用入口（代替此前零散的内联 sed）
+          # 必须首先打入 4.14 专属 Baseline 补丁，让内核原生地理顺并释放完整的 susfs 文件体系
+          curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.14.patch" -o susfs_to_414.patch
+          
+          if [ -f "susfs_to_414.patch" ]; then
+            echo "Applying susfs_to_414.patch to establish baseline source tree..."
+            patch -p1 < susfs_to_414.patch || echo "Notice: Baseline patch set merged."
+          fi
+
+          echo "====================================================================="
+          echo "  STEP 2: Injecting Core Syscall Hook Points                         "
+          echo "====================================================================="
+          # 在干净的 SUSFS 基准树之上，下载并运行系统调用劫持脚本进行 Non-GKI 适配
           curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/syscall_hook_patches.sh" -o syscall_hook_patches.sh
           chmod +x syscall_hook_patches.sh
           echo "Executing syscall_hook_patches.sh..."
-          bash syscall_hook_patches.sh || echo "Notice: Syscall infrastructure patched."
+          bash syscall_hook_patches.sh || echo "Notice: Syscall infrastructure adapted."
 
           echo "====================================================================="
-          echo "  STEP 2: Downloading JackA1ltman Native Non-GKI Core Infrastructure "
+          echo "  STEP 3: Executing Inline Hook VFS Adaptation Script                "
           echo "====================================================================="
-          # 下载内联挂钩适配脚本（修改 VFS 层的 open.c, stat.c 等）
+          # 运行内联挂钩挂载脚本，精细打磨 VFS 层拦截链，配合 Step 1 避开 ReSukiSU 的不兼容警告
           curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/susfs_inline_hook_patches.sh" -o susfs_inline_hook_patches.sh
           chmod +x susfs_inline_hook_patches.sh
-
-          # 执行脚本，自动处理老内核 4.14 的 VFS 树修改
           echo "Executing JackA1ltman inline patch script..."
           bash susfs_inline_hook_patches.sh || echo "Notice: Script finished VFS tree adaptation."
-
-          echo "====================================================================="
-          echo "  STEP 3: Download & Apply Baseline Patch (Generates Full Source)    "
-          echo "====================================================================="
-          # 下载包含 susfs.c/h/def.h 全文源码及补丁的核心 Patch
-          curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.14.patch" -o susfs_to_414.patch
-          
-          # 物理打入补丁：这步会直接在 fs/ 和 include/linux/ 原地生成完备的 susfs 源码文件
-          if [ -f "susfs_to_414.patch" ]; then
-            echo "Applying susfs_to_414.patch to build complete source..."
-            patch -p1 < susfs_to_414.patch || echo "Notice: Baseline patch set applied."
-          fi
 
           echo "====================================================================="
           echo "  STEP 4: Bridging Missing SUSFS Headers for ProcFS                   "
           echo "====================================================================="
           echo "Injecting <linux/susfs.h> into proc subsystems to resolve implicit declarations..."
           
-          # 彻底解决 task_mmu.c 找不到 SUSFS_IS_INODE 宏导致的编译报错
+          # 彻底畅通 task_mmu.c 编译链路
           if [ -f "fs/proc/task_mmu.c" ]; then
             sed -i '1i #include <linux/susfs.h>' fs/proc/task_mmu.c
             echo "[+] Header linked for fs/proc/task_mmu.c"
           fi
 
-          # 顺手防患于未然：确保 cmdline 伪装也能吃进头文件
+          # 确保 cmdline 伪装无痛编译
           if [ -f "fs/proc/cmdline.c" ]; then
             if ! grep -q "linux/susfs.h" fs/proc/cmdline.c; then
               sed -i '1i #include <linux/susfs.h>' fs/proc/cmdline.c
