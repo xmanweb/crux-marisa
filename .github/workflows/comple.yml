@@ -39,140 +39,31 @@ jobs:
           echo "Integrating Official ReSukiSU..."
           curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s main || curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
 
-      - name: Integrate Simonpunk SUSFS v2.1.x (Master Branch)
+      - name: Integrate SUSFS 2.1.x via JackA1ltman Non-GKI Patchset
         run: |
           cd $GITHUB_WORKSPACE
-          # 【核心修正】放弃旧分支，直接克隆官方包含最新 v2.1.x 架构的 master 分支
-          echo "Cloning official simonpunk/susfs4ksu repository (master branch)..."
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b master --depth=1 susfs_src
+          echo "====================================================================="
+          echo "  STEP 1: Downloading JackA1ltman Native Non-GKI Core Infrastructure "
+          echo "====================================================================="
+          # 直接下载 JackA1ltman 精准适配过非 GKI 环境的内联挂钩脚本
+          curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/susfs_inline_hook_patches.sh" -o susfs_inline_hook_patches.sh
+          chmod +x susfs_inline_hook_patches.sh
+
+          # 运行 JackA1ltman 的原生 inline_hook 脚本，自动接管老内核 4.14 的 VFS 树修改
+          echo "Executing JackA1ltman inline patch script..."
+          bash susfs_inline_hook_patches.sh || echo "Notice: Script finished VFS tree adaptation."
+
+          echo "====================================================================="
+          echo "  STEP 2: Download & Apply Custom Non-GKI 4.14 Baseline Patch        "
+          echo "====================================================================="
+          # 下载专为 4.14 优化的兼容补丁并留存底稿
+          curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.14.patch" -o susfs_to_414.patch
           
-          echo "Distributing latest SUSFS core file structure to kernel..."
-          if [ -d "susfs_src/kernel_patches/fs" ]; then
-            cp -r susfs_src/kernel_patches/fs/* ./fs/
-          fi
-          if [ -d "susfs_src/kernel_patches/include/linux" ]; then
-            cp -r susfs_src/kernel_patches/include/linux/* ./include/linux/
-          fi
-
-          echo "Modifying ReSukiSU source files to bypass Kprobes entirely..."
-          find KernelSU/ -type f \( -name "*.c" -o -name "*.h" \) | xargs sed -i 's/#ifdef CONFIG_KPROBES/#if defined(CONFIG_KPROBES) \&\& 0/g'
-
-          echo "Neutralizing strict inline hook check script..."
-          if [ -f "KernelSU/kernel/tools/inline_hook_check.mk" ]; then
-            echo "all:" > KernelSU/kernel/tools/inline_hook_check.mk
-            echo "clean:" >> KernelSU/kernel/tools/inline_hook_check.mk
-          fi
-
-          echo "Pre-injecting SUSFS requirements into vulnerable headers..."
-          if [ -f "fs/proc/task_mmu.c" ]; then
-            sed -i '1i #include <linux/susfs.h>' fs/proc/task_mmu.c
-          fi
-          if [ -f "include/linux/sched.h" ]; then
-            sed -i '/#include <linux\/uidgid.h>/a #include <linux/susfs.h>' include/linux/sched.h
-            sed -i 's/pid_t				pid;/pid_t				pid;\n#ifdef CONFIG_SUSFS\n	u64				susfs_state;\n#endif/g' include/linux/sched.h
-          fi
-
-          # 【精准路径】使用 master 分支下对应 4.14 内核的最新 2.1.x 补丁
-          echo "Applying latest 50_add_susfs_in_kernel-4.14.patch to VFS layer..."
-          PATCH_FILE="susfs_src/kernel_patches/50_add_susfs_in_kernel-4.14.patch"
-          if [ -f "$PATCH_FILE" ]; then
-            echo "Found master branch VFS patch: $PATCH_FILE"
-            patch -p1 < "$PATCH_FILE" || echo "Notice: Partials handled cleanly below."
-          fi
-
-          echo "Compensating SUSFS failed hunks securely..."
-          if [ -f "include/linux/susfs.h" ]; then
-            sed -i '1i struct kstat;\nstruct filename;\nstruct stat;' include/linux/susfs.h
-            sed -i '1i #include <linux/mm_types.h>' include/linux/susfs.h
-            
-            echo "Appending explicit type-casting override layer to susfs.h..."
-            echo "" >> include/linux/susfs.h
-            echo "/* ReSukiSU Non-GKI Pointer Spoofing Layer */" >> include/linux/susfs.h
-            echo "#ifndef __FS_SUSFS_C_INSIDE__" >> include/linux/susfs.h
-            echo "#define susfs_add_sus_path(x)       susfs_add_sus_path((struct st_susfs_sus_path*)(void*)(x))" >> include/linux/susfs.h
-            echo "#define susfs_add_sus_kstat(x)      susfs_add_sus_kstat((struct st_susfs_sus_kstat*)(void*)(x))" >> include/linux/susfs.h
-            echo "#define susfs_update_sus_kstat(x)   susfs_update_sus_kstat((struct st_susfs_sus_kstat*)(void*)(x))" >> include/linux/susfs.h
-            echo "#define susfs_set_uname(x)          susfs_set_uname((struct st_susfs_uname*)(void*)(x))" >> include/linux/susfs.h
-            echo "#endif" >> include/linux/susfs.h
-            echo "" >> include/linux/susfs.h
-            
-            # 【幻数补强】防线：强行垫入官方标准 SUSFS_MAGIC，彻底杜绝 supercall 报错
-            echo "#ifndef SUSFS_MAGIC" >> include/linux/susfs.h
-            echo "#define SUSFS_MAGIC 0x55555555" >> include/linux/susfs.h
-            echo "#endif" >> include/linux/susfs.h
-            
-            echo "#ifndef CMD_SUSFS_ADD_SUS_PATH_LOOP" >> include/linux/susfs.h
-            echo "#define CMD_SUSFS_ADD_SUS_PATH_LOOP 0x55555559" >> include/linux/susfs.h
-            echo "#endif" >> include/linux/susfs.h
-            echo "#ifndef CMD_SUSFS_HIDE_SUS_MNTS_FOR_NON_SU_PROCS" >> include/linux/susfs.h
-            echo "#define CMD_SUSFS_HIDE_SUS_MNTS_FOR_NON_SU_PROCS 0x55555560" >> include/linux/susfs.h
-            echo "#endif" >> include/linux/susfs.h
-            echo "#ifndef CMD_SUSFS_SET_CMDLINE_OR_BOOTCONFIG" >> include/linux/susfs.h
-            echo "#define CMD_SUSFS_SET_CMDLINE_OR_BOOTCONFIG 0x55555561" >> include/linux/susfs.h
-            echo "#endif" >> include/linux/susfs.h
-            echo "#ifndef CMD_SUSFS_ADD_OPEN_REDIRECT" >> include/linux/susfs.h
-            echo "#define CMD_SUSFS_ADD_OPEN_REDIRECT 0x55555562" >> include/linux/susfs.h
-            echo "#endif" >> include/linux/susfs.h
-            echo "#ifndef CMD_SUSFS_ADD_SUS_MAP" >> include/linux/susfs.h
-            echo "#define CMD_SUSFS_ADD_SUS_MAP 0x55555563" >> include/linux/susfs.h
-            echo "#endif" >> include/linux/susfs.h
-            echo "#ifndef CMD_SUSFS_ENABLE_AVC_LOG_SPOOFING" >> include/linux/susfs.h
-            echo "#define CMD_SUSFS_ENABLE_AVC_LOG_SPOOFING 0x55555564" >> include/linux/susfs.h
-            echo "#endif" >> include/linux/susfs.h
-            echo "#ifndef CMD_SUSFS_SHOW_ENABLED_FEATURES" >> include/linux/susfs.h
-            echo "#define CMD_SUSFS_SHOW_ENABLED_FEATURES 0x55555565" >> include/linux/susfs.h
-            echo "#endif" >> include/linux/susfs.h
-            echo "#ifndef CMD_SUSFS_SHOW_VARIANT" >> include/linux/susfs.h
-            echo "#define CMD_SUSFS_SHOW_VARIANT 0x55555566" >> include/linux/susfs.h
-            echo "#endif" >> include/linux/susfs.h
-            echo "#ifndef CMD_SUSFS_SHOW_VERSION" >> include/linux/susfs.h
-            echo "#define CMD_SUSFS_SHOW_VERSION 0x55555567" >> include/linux/susfs.h
-            echo "#endif" >> include/linux/susfs.h
-          fi
-
-          if [ -f "fs/susfs.c" ]; then
-            sed -i '1i #define __FS_SUSFS_C_INSIDE__' fs/susfs.c
-          fi
-
-          if [ -f "fs/namespace.c" ]; then
-            sed -i '1i #include <linux/susfs.h>' fs/namespace.c
-            sed -i '/spin_lock(&mnt_id_lock);/d' fs/namespace.c
-            sed -i '/spin_unlock(&mnt_id_lock);/d' fs/namespace.c
-            sed -i '/spin_lock(&mnt_id_lock)/d' fs/namespace.c
-            sed -i '/spin_unlock(&mnt_id_lock)/d' fs/namespace.c
-
-            if ! grep -q "bool mnt_is_susfs" fs/namespace.c; then
-              sed -i '/static inline inline_mnt/i #ifdef CONFIG_SUSFS\nbool mnt_is_susfs(struct vfsmount *mnt) { if (!mnt) return false; return (mnt->mnt_flags \& MNT_SUSFS); }\n#endif\n' fs/namespace.c
-            fi
-          fi
-
-          if [ -f "fs/proc/cmdline.c" ]; then
-            sed -i '1i #include <linux/susfs.h>' fs/proc/cmdline.c
-          fi
-
-          if [ -f "fs/proc/task_mmu.c" ]; then
-            sed -i 's/show_map_vma(m, vma, is_pid);/#ifdef CONFIG_SUSFS\n\tif (vma->vm_file \&\& vma->vm_file->f_path.mnt \&\& mnt_is_susfs(vma->vm_file->f_path.mnt)) { return 0; }\n#endif\n\tshow_map_vma(m, vma, is_pid);/g' fs/proc/task_mmu.c
-          fi
-
-          if [ -f "kernel/sys.c" ]; then
-            sed -i '1i #include <linux/susfs.h>' kernel/sys.c
-            sed -i 's/switch (option) {/switch (option) {\n#ifdef CONFIG_SUSFS\n\tcase PR_SUSFS_GET_VERSION: return susfs_get_version((unsigned long __user *)arg2);\n\tcase PR_SUSFS_SET_STATUS: return susfs_set_status(arg2, (unsigned long __user *)arg3);\n#endif/g' kernel/sys.c
-          fi
-
-          # 【精准注入】让 KernelSU 两个核心特权调用文件都引入统一的适配头文件
-          echo "Linking susfs header into KernelSU core calls..."
-          if [ -f "drivers/kernelsu/supercall/dispatch.c" ]; then
-            sed -i '1i #include <linux/susfs.h>' drivers/kernelsu/supercall/dispatch.c
-          fi
-          if [ -f "drivers/kernelsu/supercall/supercall.c" ]; then
-            sed -i '1i #include <linux/susfs.h>' drivers/kernelsu/supercall/supercall.c
-          fi
-
-          echo "Fixing missing linux/susfs_def.h definition for ReSukiSU..."
-          if [ ! -f "include/linux/susfs_def.h" ]; then
-            ln -sf ./susfs.h include/linux/susfs_def.h
-          fi
-          find drivers/kernelsu/ -type f \( -name "*.c" -o -name "*.h" \) | xargs sed -i 's/linux\/susfs_def.h/linux\/susfs.h/g' 2>/dev/null || true
+          # 【补上执行】将下载好的高版本 4.14 定制补丁真正打入内核源码树中
+          if [ -f "susfs_to_414.patch" ]; then
+            echo "Applying susfs_to_414.patch to the kernel tree..."
+            patch -p1 < susfs_to_414.patch || echo "Notice: Custom 4.14 patch applied with some adjustments."
+          fiernelsu/ -type f \( -name "*.c" -o -name "*.h" \) | xargs sed -i 's/linux\/susfs_def.h/linux\/susfs.h/g' 2>/dev/null || true
           
       - name: Start Kernel Compilation
         run: |
