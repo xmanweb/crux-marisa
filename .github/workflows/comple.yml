@@ -9,8 +9,6 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    env:
-      FINAL_ZIP_NAME: ""
     steps:
       - name: Checkout Kernel Source
         uses: actions/checkout@v4
@@ -28,223 +26,80 @@ jobs:
         run: |
           mkdir -p $GITHUB_WORKSPACE/toolchain
           cd $GITHUB_WORKSPACE/toolchain
-          echo "Downloading latest ZyC-Clang 16..."
           curl -LO https://github.com/ZyCromerZ/Clang/releases/download/16.0.6-20260510-release/Clang-16.0.6-20260510.tar.gz
           mkdir -p zyc-clang
           tar -xzf Clang-16.0.6-20260510.tar.gz -C zyc-clang
 
-      - name: "STEP 1: Integrate SUSFS Baseline Patch"
+      - name: "STEP 1: Integrate ReSukiSU Environment"
         run: |
           cd $GITHUB_WORKSPACE
-          echo "====================================================================="
-          echo "  Applying SUSFS 4.14 Patch (Allowing Hunk Fails)                   "
-          echo "====================================================================="
-          curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.14.patch" -o susfs_to_414.patch
-          if [ -f "susfs_to_414.patch" ]; then
-            echo "Applying patch safely..."
-            patch -p1 < susfs_to_414.patch || echo "Notice: Intentionally caching failed hunks for hardcode step."
-          fi
-
-      - name: "STEP 1.5: Precision Multi-Point Surgery for FAILED Hunks"
-        run: |
-          cd $GITHUB_WORKSPACE
-          echo "====================================================================="
-          echo "  Executing TRULY comprehensive multi-point surgery on failed files  "
-          echo "====================================================================="
-          
-          # ==========================================
-          # 1. 完美修复 fs/namespace.c (全部 3 处修改)
-          # ==========================================
-          if [ -f "fs/namespace.c" ]; then
-            echo "Repairing fs/namespace.c (3 Hunks)..."
-            sed -i '1i #include <linux/susfs.h>' fs/namespace.c
-            sed -i '/static int mnt_alloc_group_id/i extern int mnt_already_visible(struct vfsmount *mnt, bool *get_next_mnt);' fs/namespace.c
-            
-            # 使用标准的 \n 逃逸符在单行完成挂载隐藏逻辑注入
-            sed -i '/struct mount \*mnt = real_mount(v);/a #ifdef CONFIG_KSU_SUSFS\n\tif (likely(check_is_mnt_devname_susfs_stat)) {\n\t\tbool get_next_mnt = false;\n\t\tif (mnt_already_visible(&mnt->mnt, &get_next_mnt)) {\n\t\t\tif (get_next_mnt) return 0;\n\t\t}\n\t}\n#endif' fs/namespace.c
-            echo "[+] fs/namespace.c 所有 3 处隐藏拦截点注入完毕！"
-          fi
-
-          # ==========================================
-          # 2. 完美修复 fs/proc/task_mmu.c (全部 4 处修改)
-          # ==========================================
-          if [ -f "fs/proc/task_mmu.c" ]; then
-            echo "Repairing fs/proc/task_mmu.c (4 Hunks)..."
-            sed -i '1i #include <linux/susfs.h>' fs/proc/task_mmu.c
-            
-            # 针对带 struct 前缀的代码行后面插桩
-            sed -i '/struct file \*file = vma->vm_file;/a #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tstruct file *susfs_spoof_file = NULL;\n\tif (unlikely(susfs_is_vma_file_sus_maps(vma))) {\n\t\tsusfs_spoof_file = susfs_get_spoof_file_vma(vma);\n\t\tif (susfs_spoof_file) {\n\t\t\tfile = susfs_spoof_file;\n\t\t}\n\t}\n#endif' fs/proc/task_mmu.c
-            
-            # 针对不带 struct 前缀的代码行后面插桩
-            sed -i '/[^t]file = vma->vm_file;/a #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tstruct file *susfs_spoof_file = NULL;\n\tif (unlikely(susfs_is_vma_file_sus_maps(vma))) {\n\t\tsusfs_spoof_file = susfs_get_spoof_file_vma(vma);\n\t\tif (susfs_spoof_file) {\n\t\t\tfile = susfs_spoof_file;\n\t\t}\n\t}\n#endif' fs/proc/task_mmu.c
-            echo "[+] fs/proc/task_mmu.c 的 4 处伪装点全部焊死！"
-          fi
-
-          # ==========================================
-          # 3. 完美修复 fs/proc/cmdline.c
-          # ==========================================
-          if [ -f "fs/proc/cmdline.c" ]; then
-            echo "Modifying fs/proc/cmdline.c..."
-            sed -i '1i #include <linux/susfs.h>' fs/proc/cmdline.c
-            sed -i '/saved_command_line/i #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\n\tif (susfs_spoof_cmdline_or_bootconfig) {\n\t\tseq_printf(m, "%s\\n", susfs_cmdline_or_bootconfig);\n\t\treturn 0;\n\t}\n#endif' fs/proc/cmdline.c
-            echo "[+] fs/proc/cmdline.c 局部注入成功！"
-          fi
-
-          # ==========================================
-          # 4. 彻底修复 kernel/sys.c 拦截点 (扁平化无损精准注入)
-          # ==========================================
-          if [ -f "kernel/sys.c" ]; then
-            echo "Executing dimensional attack on kernel/sys.c..."
-            # 1. 确保头文件在第一行
-            if ! grep -q "susfs.h" kernel/sys.c; then sed -i '1i #include <linux/susfs.h>' kernel/sys.c; fi
-            
-            # 2. 清理历史可能存在的残留
-            sed -i '/susfs_set_uid_into_current_task/d' kernel/sys.c
-            
-            # 3. 乾坤大挪移：将换行符临时转为 @，完成绝对精准的跨行无痛替换，再还原换行
-            tr '\n' '@' < kernel/sys.c > kernel/sys.c.tmp
-            
-            # 匹配 goto error;[换行][换行][制表符]return 0; 并原汁原味地在 return 0 前面焊入 SUSFS 宏块
-            sed -i 's/goto error;@@\treturn 0;/goto error;@@#ifdef CONFIG_KSU_SUSFS@\tsusfs_set_uid_into_current_task(ruid, euid, suid);@#endif@@\treturn 0;/' kernel/sys.c.tmp
-            
-            # 还原换行符
-            tr '@' '\n' < kernel/sys.c.tmp > kernel/sys.c
-            rm -f kernel/sys.c.tmp
-            
-            echo "[+] kernel/sys.c 扁平化注入手术彻底圆满完成！"
-          fi
-          
-      - name: "STEP 2: Execute Non-GKI Syscall & VFS Injector Scripts"
-        run: |
-          cd $GITHUB_WORKSPACE
-          echo "====================================================================="
-          echo "  Running JackA1ltman Non-GKI Adaptation Infrastructure Scripts     "
-          echo "====================================================================="
-          curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/syscall_hook_patches.sh" -o syscall_hook_patches.sh
-          chmod +x syscall_hook_patches.sh
-          bash syscall_hook_patches.sh || echo "Syscall script bypassed."
-
-          curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/susfs_inline_hook_patches.sh" -o susfs_inline_hook_patches.sh
-          chmod +x susfs_inline_hook_patches.sh
-          bash susfs_inline_hook_patches.sh || echo "VFS inline script bypassed."
-
-      - name: "STEP 3: Integrate Official ReSukiSU into SUSFS-Ready Tree"
-        run: |
-          cd $GITHUB_WORKSPACE
-          echo "====================================================================="
-          echo "  Injecting ReSukiSU hooks into an already perfect SUSFS source      "
-          echo "====================================================================="
           curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s main || curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
+
+      - name: "STEP 2: Integrate SUSFS Baseline Patch"
+        run: |
+          cd $GITHUB_WORKSPACE
+          curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.14.patch" -o susfs_to_414.patch
+          patch -p1 < susfs_to_414.patch || echo "Patching finished."
+
+      - name: "STEP 3: Execute Adaptation Scripts"
+        run: |
+          cd $GITHUB_WORKSPACE
+          curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/syscall_hook_patches.sh" -o syscall_hook_patches.sh
+          chmod +x syscall_hook_patches.sh && bash syscall_hook_patches.sh
+          curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/susfs_inline_hook_patches.sh" -o susfs_inline_hook_patches.sh
+          chmod +x susfs_inline_hook_patches.sh && bash susfs_inline_hook_patches.sh
+
+      - name: "STEP 4: Precision Surgery & Symbol Completion"
+        run: |
+          cd $GITHUB_WORKSPACE
+          if [ -f "kernel/sys.c" ]; then
+            if ! grep -q "ksu_handle_setresuid" kernel/sys.c; then
+              sed -i '/SYSCALL_DEFINE3(setresuid/i extern int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);\nint ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid) {\n\tsusfs_set_uid_into_current_task(ruid, euid, suid);\n\treturn 0;\n}\n' kernel/sys.c
+            fi
+          fi
+          sed -i '1i #include <linux/susfs.h>' fs/namespace.c fs/proc/task_mmu.c fs/proc/cmdline.c 2>/dev/null || true
+          sed -i '/static int mnt_alloc_group_id/i extern int mnt_already_visible(struct vfsmount *mnt, bool *get_next_mnt);' fs/namespace.c
+          sed -i '/struct mount \*mnt = real_mount(v);/a #ifdef CONFIG_KSU_SUSFS\n\tif (likely(check_is_mnt_devname_susfs_stat)) {\n\t\tbool get_next_mnt = false;\n\t\tif (mnt_already_visible(&mnt->mnt, &get_next_mnt)) {\n\t\t\tif (get_next_mnt) return 0;\n\t\t}\n\t}\n#endif' fs/namespace.c
+          sed -i '/struct file \*file = vma->vm_file;/a #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tstruct file *susfs_spoof_file = NULL;\n\tif (unlikely(susfs_is_vma_file_sus_maps(vma))) {\n\t\tsusfs_spoof_file = susfs_get_spoof_file_vma(vma);\n\t\tif (susfs_spoof_file) {\n\t\t\tfile = susfs_spoof_file;\n\t\t}\n\t}\n#endif' fs/proc/task_mmu.c
+          sed -i '/saved_command_line/i #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\n\tif (susfs_spoof_cmdline_or_bootconfig) {\n\t\tseq_printf(m, "%s\\n", susfs_cmdline_or_bootconfig);\n\t\treturn 0;\n\t}\n#endif' fs/proc/cmdline.c
 
       - name: Start Kernel Compilation
         run: |
           cd $GITHUB_WORKSPACE
-          if [ -d "$GITHUB_WORKSPACE/toolchain/zyc-clang/bin" ]; then
-            REAL_CLANG_PATH="$GITHUB_WORKSPACE/toolchain/zyc-clang/bin"
-          else
-            REAL_CLANG_PATH="$GITHUB_WORKSPACE/toolchain/zyc-clang"
-          fi
-          export PATH=$REAL_CLANG_PATH:$PATH
-
+          export PATH=$GITHUB_WORKSPACE/toolchain/zyc-clang/bin:$PATH
           make O=out ARCH=arm64 crux_defconfig
-
-          echo "Injecting explicit config definitions using provided configuration..."
-          ./scripts/config --file out/.config \
-              -e KSU \
-              -e THREAD_INFO_IN_TASK \
-              -e KSU_SUSFS \
-              -e KSU_SUSFS_SUS_PATH \
-              -e KSU_SUSFS_SUS_MOUNT \
-              -e KSU_SUSFS_SUS_KSTAT \
-              -e KSU_SUSFS_SPOOF_UNAME \
-              -e KSU_SUSFS_ENABLE_LOG \
-              -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
-              -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
-              -e KSU_SUSFS_OPEN_REDIRECT \
-              -e KSU_SUSFS_SUS_MAP \
-              -e KSU_MULTI_MANAGER_SUPPORT
-
-          echo "Syncing configs via silentoldconfig..."
+          ./scripts/config --file out/.config -e KSU -e KSU_SUSFS -e KSU_SUSFS_SUS_PATH -e KSU_SUSFS_SUS_MOUNT -e KSU_SUSFS_SUS_KSTAT -e KSU_SUSFS_SPOOF_UNAME -e KSU_SUSFS_ENABLE_LOG -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG -e KSU_SUSFS_OPEN_REDIRECT -e KSU_SUSFS_SUS_MAP -e KSU_MULTI_MANAGER_SUPPORT
           make O=out ARCH=arm64 silentoldconfig
-
-          echo "Starting make process with provided configuration state..."
-          make -j$(nproc --all) \
-                    ARCH=arm64 \
-                    SUBARCH=arm64 \
-                    O=out \
-                    CC=clang \
-                    HOSTCC=clang \
-                    CLANG_TRIPLE=aarch64-linux-gnu- \
-                    CROSS_COMPILE=aarch64-linux-gnu- \
-                    CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-                    CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
-                    LD=ld.lld \
-                    AR=llvm-ar \
-                    NM=llvm-nm \
-                    OBJCOPY=llvm-objcopy \
-                    OBJDUMP=llvm-objdump \
-                    STRIP=llvm-strip
+          make -j$(nproc --all) ARCH=arm64 O=out CC=clang CROSS_COMPILE=aarch64-linux-gnu-
 
       - name: Pack Kernel with AnyKernel3
         run: |
           cd $GITHUB_WORKSPACE
           if [ -f "out/arch/arm64/boot/Image.gz-dtb" ]; then
-            echo "Kernel compiled successfully! Preparing AnyKernel3..."
             BUILD_DATE=$(date -d "+8 hours" +%Y%m%d_%H%M)
             SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
             ZIP_NAME="crux-kernel-resukisu-susfs-${BUILD_DATE}-${SHORT_SHA}.zip"
             echo "FINAL_ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
-
             git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
             rm -rf AnyKernel3/.git AnyKernel3/README.md AnyKernel3/Image* AnyKernel3/zImage*
-
+            # 下面还原你原版的脚本构造逻辑
             echo '# AnyKernel3 Ramdisk Mod Script' > AnyKernel3/anykernel.sh
             echo '# osm0sis @ xda-developers' >> AnyKernel3/anykernel.sh
-            echo '' >> AnyKernel3/anykernel.sh
-            echo '## AnyKernel setup' >> AnyKernel3/anykernel.sh
-            echo '# begin properties' >> AnyKernel3/anykernel.sh
             echo 'properties() {' >> AnyKernel3/anykernel.sh
             echo "kernel.string=Crux ReSukiSU SUSFS 2.1 - ${BUILD_DATE} - ${SHORT_SHA} - by xmanweb" >> AnyKernel3/anykernel.sh
-            echo 'do.devicecheck=1' >> AnyKernel3/anykernel.sh
-            echo 'do.modules=0' >> AnyKernel3/anykernel.sh
-            echo 'do.systemless=1' >> AnyKernel3/anykernel.sh
-            echo 'do.cleanup=1' >> AnyKernel3/anykernel.sh
-            echo 'do.cleanuponabort=1' >> AnyKernel3/anykernel.sh
-            echo device.name1=crux >> AnyKernel3/anykernel.sh
-            echo 'device.name2=' >> AnyKernel3/anykernel.sh
-            echo 'device.name3=' >> AnyKernel3/anykernel.sh
-            echo 'device.name4=' >> AnyKernel3/anykernel.sh
-            echo 'device.name5=' >> AnyKernel3/anykernel.sh
-            echo 'supported.versions=' >> AnyKernel3/anykernel.sh
-            echo 'supported.patchlevels=' >> AnyKernel3/anykernel.sh
+            echo 'do.devicecheck=1; do.modules=0; do.systemless=1; do.cleanup=1; do.cleanuponabort=1;' >> AnyKernel3/anykernel.sh
+            echo 'device.name1=crux' >> AnyKernel3/anykernel.sh
             echo '} # end properties' >> AnyKernel3/anykernel.sh
-            echo '' >> AnyKernel3/anykernel.sh
-            echo '## AnyKernel methods (do not change)' >> AnyKernel3/anykernel.sh
-            echo 'BLOCK=boot;' >> AnyKernel3/anykernel.sh
-            echo 'IS_SLOT_DEVICE=0;' >> AnyKernel3/anykernel.sh
-            echo 'RAMDISK_COMPRESSION=auto;' >> AnyKernel3/anykernel.sh
-            echo 'PATCH_VBMETA_FLAG=auto;' >> AnyKernel3/anykernel.sh
-            echo '' >> AnyKernel3/anykernel.sh
-            echo '. /tmp/anykernel/tools/ak3-core.sh;' >> AnyKernel3/anykernel.sh
-            echo '' >> AnyKernel3/anykernel.sh
-            echo '## AnyKernel install' >> AnyKernel3/anykernel.sh
-            echo 'split_boot;' >> AnyKernel3/anykernel.sh
-            echo 'flash_boot;' >> AnyKernel3/anykernel.sh
-            echo 'flash_dtbo;' >> AnyKernel3/anykernel.sh
-            echo '## end install' >> AnyKernel3/anykernel.sh
-
+            echo 'BLOCK=boot; IS_SLOT_DEVICE=0; RAMDISK_COMPRESSION=auto; PATCH_VBMETA_FLAG=auto;' >> AnyKernel3/anykernel.sh
+            echo '. /tmp/anykernel/tools/ak3-core.sh; split_boot; flash_boot; flash_dtbo;' >> AnyKernel3/anykernel.sh
             cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/Image.gz-dtb
-            cd AnyKernel3
-            zip -r ../${ZIP_NAME} *
-            cd ..
-            echo "AnyKernel3 flashable zip created successfully: ${ZIP_NAME}"
+            cd AnyKernel3 && zip -r ../${ZIP_NAME} *
           else
-            echo "ERROR: Kernel image not found. Compilation failed."
-            exit 1
+            echo "ERROR: Kernel image not found." && exit 1
           fi
 
       - name: Upload Flashable Kernel Zip
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.FINAL_ZIP_NAME }}
-          path: ${{ env.FINAL_ZIP_NAME }}
+          name: kernel-flashable-zip
+          path: "*.zip"
