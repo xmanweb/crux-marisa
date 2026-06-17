@@ -1,4 +1,4 @@
-name: "Compile Crux Kernel (ReSukiSU & SUSFS 2.1 - Native Hook)"
+name: "Compile Crux Kernel"
 
 on:
   push:
@@ -29,159 +29,63 @@ jobs:
         run: |
           mkdir -p $GITHUB_WORKSPACE/toolchain
           cd $GITHUB_WORKSPACE/toolchain
-          echo "Downloading latest ZyC-Clang 16..."
           curl -LO https://github.com/ZyCromerZ/Clang/releases/download/16.0.6-20260510-release/Clang-16.0.6-20260510.tar.gz
           mkdir -p zyc-clang
           tar -xzf Clang-16.0.6-20260510.tar.gz -C zyc-clang
 
-      # =====================================================================
-      # PHASE 1: 打底 Patch 尝试与 REJ 现场捕获
-      # =====================================================================
       - name: "PHASE 1: Apply SUSFS 4.14 Baseline Patch"
         run: |
           cd $GITHUB_WORKSPACE
-          echo "====================================================================="
-          echo "  STEP 1: Download & Apply Custom Non-GKI 4.14 Baseline Patch        "
-          echo "====================================================================="
           curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.14.patch" -o susfs_to_414.patch
-          
           if [ -f "susfs_to_414.patch" ]; then
-            echo "Applying susfs_to_414.patch to the clean kernel tree..."
-            patch -p1 < susfs_to_414.patch || echo "Notice: Some hunks failed. Processing .rej files below..."
+            patch -p1 < susfs_to_414.patch || echo "Notice: Some hunks failed."
           fi
 
-          echo "====================================================================="
-          echo "  🚨 SCANNING & DUMPING PATCH REJECTS (.rej)                         "
-          echo "====================================================================="
-          REJ_FILES=$(find . -name "*.rej")
-          if [ -z "$REJ_FILES" ]; then
-            echo "✅ CONGRATULATIONS: No .rej files found! Patch applied 100% cleanly."
-          else
-            echo "⚠️ DETECTED PATCH FAILURES! Dumping reject details for target alignment:"
-            for rej in $REJ_FILES; do
-              echo "---------------------------------------------------------------------"
-              echo " 📄 REJECTED FILE: $rej"
-              echo "---------------------------------------------------------------------"
-              cat "$rej"
-              echo "---------------------------------------------------------------------"
-            done
-          fi
-
-      # =====================================================================
-      # PHASE 1.5: 核心对账抢救（在引入任何外部框架前，强行手工接盘 VFS 脱靶文件）
-      # =====================================================================
       - name: "PHASE 1.5: Intercept & Manually Rescue Failed Hunks"
         run: |
           cd $GITHUB_WORKSPACE
-          
-          monitor_diff() {
-            local file_path="$1"
-            local patch_title="$2"
-            echo "---------------------------------------------------------------------"
-            echo "  🔍 MONITORING: ${patch_title}"
-            echo "---------------------------------------------------------------------"
-            if [ -f "$file_path" ]; then
-              git diff "$file_path"
-              if git diff --quiet "$file_path"; then
-                echo "⚠️ WARNING: No changes detected in ${file_path}! Injection might have failed."
-              else
-                echo "✅ SUCCESS: Changes verified in ${file_path}."
-              fi
-            else
-              echo "❌ ERROR: Target file ${file_path} does not exist!"
-            fi
-            echo "---------------------------------------------------------------------"
-          }
-
-          echo "Executing precise manual redirection based on .rej logs..."
-
-          # 【手工接盘 1】强行校正 fs/namespace.c
           if [ -f "fs/namespace.c" ]; then
-            echo "Manually injecting failed SUSFS code into fs/namespace.c..."
             sed -i '/int id = mnt->mnt_id;/a #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (mnt->mnt.mnt_flags & VFSMOUNT_MNT_FLAGS_KSU_UNSHARED_MNT)\n\t\treturn;\n#endif' fs/namespace.c
             sed -i '/if (!ida_pre_get(&mnt_group_ida, GFP_KERNEL))/i #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (susfs_is_current_ksu_domain()) {\n\t\tif (!ida_pre_get(&mnt_group_ida, GFP_KERNEL))\n\t\t\treturn -ENOMEM;\n\t\tres = ida_get_new_above(&mnt_group_ida, DEFAULT_KSU_MNT_GROUP_ID, \&mnt->mnt_group_id);\n\t\tgoto bypass_orig_flow;\n\t}\n#endif' fs/namespace.c
             sed -i '/res = ida_get_new_above(&mnt_group_ida,/i #ifndef CONFIG_KSU_SUSFS_SUS_MOUNT' fs/namespace.c
             sed -i '/mnt_group_start = mnt->mnt_group_id + 1;/i #endif\nbypass_orig_flow:' fs/namespace.c
-            monitor_diff "fs/namespace.c" "fs/namespace.c - Unshared Mnt Bypass"
           fi
-
-          # 【手工接盘 2】强行校正 fs/proc/cmdline.c
           if [ -f "fs/proc/cmdline.c" ]; then
-            echo "Manually injecting failed SUSFS code into fs/proc/cmdline.c..."
             sed -i '/static int cmdline_proc_show/i #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\nextern struct static_key_false susfs_is_fake_cmdline_or_bootconfig_buffer_set;\nextern void susfs_spoof_cmdline_or_bootconfig(struct seq_file *m);\n#endif' fs/proc/cmdline.c
-            
             CMDLINE_LN=$(awk '/static int cmdline_proc_show/,/{/{if($0 ~ /{/){print NR; exit}}' fs/proc/cmdline.c)
             if [ ! -z "$CMDLINE_LN" ]; then
               sed -i "${CMDLINE_LN}a #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\n\tif (static_branch_likely(&susfs_is_fake_cmdline_or_bootconfig_buffer_set)) {\n\t\tsusfs_spoof_cmdline_or_bootconfig(m);\n\t\tseq_printf(m, \"%s\\\\n\");\n\t\treturn 0;\n\t}\n#endif" fs/proc/cmdline.c
             fi
-            monitor_diff "fs/proc/cmdline.c" "fs/proc/cmdline.c - Spoof Cmdline"
           fi
-
-          # 【手工接盘 3】强行校正 fs/proc/task_mmu.c
           if [ -f "fs/proc/task_mmu.c" ]; then
-            echo "Manually injecting failed SUSFS code into fs/proc/task_mmu.c..."
             sed -i '/#include <linux\/uaccess.h>/i #if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)\n#include <linux/susfs.h>\n#endif' fs/task_mmu.c 2>/dev/null || sed -i '/#include <linux\/uaccess.h>/i #if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)\n#include <linux/susfs.h>\n#endif' fs/proc/task_mmu.c
             sed -i '/if (!rollup_mode)/a #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tif (vma->vm_file) {\n\t\tif (SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n\t\t\treturn 0;\n\t}\n#endif' fs/proc/task_mmu.c
             sed -i '/arch_show_smap(m, vma);/i #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tif (vma->vm_file) {\n\t\tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n\t\t\tgoto bypass_orig_flow;\n\t}\n#endif' fs/proc/task_mmu.c
             sed -i '/m_cache_vma(m, vma);/i #ifdef CONFIG_KSU_SUSFS_SUS_MAP\nbypass_orig_flow:\n#endif' fs/proc/task_mmu.c
-            monitor_diff "fs/proc/task_mmu.c" "fs/proc/task_mmu.c - Task MMU Sus Map"
           fi
-
-          # 【手工接盘 4】强行校正 kernel/sys.c (兼容 A11-A15 源码级 uname 伪造)
           if [ -f "kernel/sys.c" ]; then
-            echo "Manually injecting missing SUSFS spoof_uname logic into kernel/sys.c..."
-            # 1. 注入上半部分外部声明
             sed -i '/SYSCALL_DEFINE1(newuname/i #ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME\nextern struct static_key_false susfs_is_uname_spoof_buffer_set;\nextern void susfs_spoof_uname(struct new_utsname* tmp);\n#endif' kernel/sys.c
-            # 2. 注入核心拦截逻辑
             sed -i '/memcpy(&tmp, utsname(), sizeof(tmp));/a #ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME\n\tif (static_branch_likely(&susfs_is_uname_spoof_buffer_set))\n\t\tsusfs_spoof_uname(\&tmp);\n#endif' kernel/sys.c
-            monitor_diff "kernel/sys.c" "kernel/sys.c - Hardcoded Spoof Uname"
           fi
 
-      # =====================================================================
-      # PHASE 2: 顺理成章引入外部框架 ReSukiSU
-      # =====================================================================
       - name: "PHASE 2: Integrate Official ReSukiSU"
         run: |
           cd $GITHUB_WORKSPACE
-          echo "Integrating Official ReSukiSU environment..."
           curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s main || curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
 
-      # =====================================================================
-      # PHASE 3: 运行 Inline Hook 脚本并全面进行【可视化代码审查对账】
-      # =====================================================================
       - name: "PHASE 3: Apply JackA1ltman Native Non-GKI Core Infrastructure"
         run: |
           cd $GITHUB_WORKSPACE
-          echo "====================================================================="
-          echo "  STEP 1: Download & Execute JackA1ltman Inline Hook Script         "
-          echo "====================================================================="
           curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/susfs_inline_hook_patches.sh" -o susfs_inline_hook_patches.sh
           chmod +x susfs_inline_hook_patches.sh
-          echo "Executing JackA1ltman inline patch script..."
           bash susfs_inline_hook_patches.sh || echo "Notice: VFS tree adaptation finished."
-          
-          # 🚨 已彻底移除会导致头文件冲突错改的 find/sed 污染语句，完美保留原生 <linux/susfs_def.h> 引用
 
-          # =====================================================================
-          # 🔍 终极全白盒对账：深度导出所有被自动化脚本动过刀子的源码 diff
-          # =====================================================================
-          echo "====================================================================="
-          echo "  🔍 DEEP CODE AUDIT: Inline Hook Patch Verification                 "
-          echo "====================================================================="
-          
           audit_diff() {
             local file_path="$1"
-            echo "---------------------------------------------------------------------"
-            echo " 📄 INSPECTING MODIFIED FILE: ${file_path}"
-            echo "---------------------------------------------------------------------"
             if [ -f "${file_path}" ]; then
               git diff "${file_path}"
-            else
-              echo "❌ ERROR: File ${file_path} not found for auditing."
             fi
-            echo "---------------------------------------------------------------------"
           }
-
           audit_diff "fs/exec.c"
           audit_diff "fs/open.c"
           audit_diff "fs/read_write.c"
@@ -191,13 +95,9 @@ jobs:
           audit_diff "kernel/sys.c"
           audit_diff "drivers/input/input.c"
 
-      # =====================================================================
-      # PHASE 4: 正式 Clang 编译阶段
-      # =====================================================================
       - name: Start Kernel Compilation
         run: |
           cd $GITHUB_WORKSPACE
-          
           if [ -d "$GITHUB_WORKSPACE/toolchain/zyc-clang/bin" ]; then
             REAL_CLANG_PATH="$GITHUB_WORKSPACE/toolchain/zyc-clang/bin"
           else
@@ -205,10 +105,8 @@ jobs:
           fi
           export PATH=$REAL_CLANG_PATH:$PATH
 
-          # 生成 crux 默认配置
           make O=out ARCH=arm64 crux_defconfig
           
-          # 激活编译配置项
           ./scripts/config --file out/.config \
               -e KSU \
               -e THREAD_INFO_IN_TASK \
@@ -227,7 +125,6 @@ jobs:
 
           make O=out ARCH=arm64 silentoldconfig
 
-          # 正式执行内核编译
           make -j$(nproc --all) \
                       ARCH=arm64 \
                       SUBARCH=arm64 \
@@ -248,8 +145,6 @@ jobs:
       - name: Pack Kernel with AnyKernel3 (Dual Output with DTBO)
         run: |
           cd $GITHUB_WORKSPACE
-          echo "Preparing AnyKernel3 Dual Track Workspace..."
-          
           BUILD_DATE=$(date -d "+8 hours" +%Y%m%d_%H%M)
           SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
           
@@ -268,7 +163,6 @@ jobs:
           define_properties() {
             local target_script="$1"
             local track_mode="$2"
-            
             echo '# AnyKernel3 Ramdisk Mod Script' > "$target_script"
             echo 'properties() { ' >> "$target_script"
             echo "kernel.string=Mi9Pro crux ReSukiSU SUSFS - ${track_mode} - ${BUILD_DATE}" >> "$target_script"
@@ -279,15 +173,10 @@ jobs:
             echo '. /tmp/anykernel/tools/ak3-core.sh;' >> "$target_script"
             echo 'split_boot;' >> "$target_script"
             echo 'flash_boot;' >> "$target_script"
-            
             if [ "$track_mode" = "With-DTB" ]; then
               if [ -f "out/arch/arm64/boot/dtbo.img" ]; then
                 echo 'flash_dtbo;' >> "$target_script"
-              else
-                echo '# flash_dtbo; (Skipped due to no source dtbo.img)' >> "$target_script"
               fi
-            else
-              echo '# flash_dtbo;' >> "$target_script"
             fi
           }
           
@@ -297,9 +186,8 @@ jobs:
           if [ -f "out/arch/arm64/boot/Image.gz-dtb" ]; then
             cp out/arch/arm64/boot/Image.gz-dtb ak3_with_dtb/Image.gz-dtb
           else
-            echo "Error: Image.gz-dtb missing!" && exit 1
+            exit 1
           fi
-          
           if [ -f "out/arch/arm64/boot/dtbo.img" ]; then
             cp out/arch/arm64/boot/dtbo.img ak3_with_dtb/dtbo.img
           fi
@@ -307,16 +195,11 @@ jobs:
           if [ -f "out/arch/arm64/boot/Image" ]; then
             gzip -c out/arch/arm64/boot/Image > ak3_no_dtb/Image.gz
           else
-            echo "Error: Base Image missing!" && exit 1
+            exit 1
           fi
 
-          cd ak3_with_dtb
-          zip -r ../${ZIP_FULL} *
-          cd ..
-          
-          cd ak3_no_dtb
-          zip -r ../${ZIP_NODTB} *
-          cd ..
+          cd ak3_with_dtb && zip -r ../${ZIP_FULL} * && cd ..
+          cd ak3_no_dtb && zip -r ../${ZIP_NODTB} * && cd ..
 
       - name: Upload Both Kernel Zips
         uses: actions/upload-artifact@v4
