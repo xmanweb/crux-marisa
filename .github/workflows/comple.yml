@@ -16,7 +16,7 @@ jobs:
       - name: Checkout Kernel Source
         uses: actions/checkout@v4
         with:
-          ref: test
+          ref: A16-test
 
       - name: Install Build Dependencies
         run: |
@@ -44,7 +44,27 @@ jobs:
           
           if [ -f "susfs_to_414.patch" ]; then
             echo "Applying susfs_to_414.patch to the clean kernel tree..."
-            patch -p1 < susfs_to_414.patch || echo "Notice: Baseline patch finished. Rej files handled via subsequent manual step injection."
+            patch -p1 < susfs_to_414.patch || echo "Notice: Some hunks failed. Processing .rej files below..."
+          fi
+
+          # =====================================================================
+          # 🔍 自动化 REJ 拒绝文件日志倾倒监控流
+          # =====================================================================
+          echo "====================================================================="
+          echo "  🚨 SCANNING & DUMPING PATCH REJECTS (.rej)                         "
+          echo "====================================================================="
+          REJ_FILES=$(find . -name "*.rej")
+          if [ -z "$REJ_FILES" ]; then
+            echo "✅ CONGRATULATIONS: No .rej files found! Patch applied 100% cleanly."
+          else
+            echo "⚠️ DETECTED PATCH FAILURES! Dumping reject details for target alignment:"
+            for rej in $REJ_FILES; do
+              echo "---------------------------------------------------------------------"
+              echo " 📄 REJECTED FILE: $rej"
+              echo "---------------------------------------------------------------------"
+              cat "$rej"
+              echo "---------------------------------------------------------------------"
+            done
           fi
 
       - name: "PHASE 2: Integrate Official ReSukiSU"
@@ -79,14 +99,34 @@ jobs:
           export PATH=$REAL_CLANG_PATH:$PATH
 
           # =====================================================================
-          # "PHASE 4: Fix SUSFS Patch Failures & Precision Hook Injection"
+          # "PHASE 4: Visual Monitor - Fix SUSFS Patch Failures & Hook Injection"
           # =====================================================================
           
+          monitor_diff() {
+            local file_path="$1"
+            local patch_title="$2"
+            echo "---------------------------------------------------------------------"
+            echo "  🔍 MONITORING: ${patch_title}"
+            echo "---------------------------------------------------------------------"
+            if [ -f "$file_path" ]; then
+              git diff "$file_path"
+              if git diff --quiet "$file_path"; then
+                echo "⚠️ WARNING: No changes detected in ${file_path}! Injection might have failed."
+              else
+                echo "✅ SUCCESS: Changes verified in ${file_path}."
+              fi
+            else
+              echo "❌ ERROR: Target file ${file_path} does not exist!"
+            fi
+            echo "---------------------------------------------------------------------"
+          }
+
           # 【修复 1】补救 kernel/sys.c 中脱靶的 newuname 伪造
           if [ -f "kernel/sys.c" ]; then
             echo "Manually injecting failed SUSFS code into kernel/sys.c..."
             sed -i '/SYSCALL_DEFINE1(newuname/i #ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME\nextern struct static_key_false susfs_is_uname_spoof_buffer_set;\nextern void susfs_spoof_uname(struct new_utsname* tmp);\n#endif' kernel/sys.c
             sed -i '/memcpy(&tmp, utsname(), sizeof(tmp));/a #ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME\n\tif (static_branch_likely(&susfs_is_uname_spoof_buffer_set))\n\t\tsusfs_spoof_uname(&tmp);\n#endif' kernel/sys.c
+            monitor_diff "kernel/sys.c" "kernel/sys.c - Uname Spoof Injection"
           fi
 
           # 【修复 2】补救 fs/namespace.c 中脱靶的 unshared mnt 绕过
@@ -96,6 +136,7 @@ jobs:
             sed -i '/if (!ida_pre_get(&mnt_group_ida, GFP_KERNEL))/i #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (susfs_is_current_ksu_domain()) {\n\t\tif (!ida_pre_get(&mnt_group_ida, GFP_KERNEL))\n\t\t\treturn -ENOMEM;\n\t\tres = ida_get_new_above(&mnt_group_ida, DEFAULT_KSU_MNT_GROUP_ID, \&mnt->mnt_group_id);\n\t\tgoto bypass_orig_flow;\n\t}\n#endif' fs/namespace.c
             sed -i '/res = ida_get_new_above(&mnt_group_ida,/i #ifndef CONFIG_KSU_SUSFS_SUS_MOUNT' fs/namespace.c
             sed -i '/mnt_group_start = mnt->mnt_group_id + 1;/i #endif\nbypass_orig_flow:' fs/namespace.c
+            monitor_diff "fs/namespace.c" "fs/namespace.c - Unshared Mnt Bypass"
           fi
 
           # 【修复 3】补救 fs/proc/cmdline.c
@@ -105,9 +146,9 @@ jobs:
             
             CMDLINE_LN=$(awk '/static int cmdline_proc_show/,/{/{if($0 ~ /{/){print NR; exit}}' fs/proc/cmdline.c)
             if [ ! -z "$CMDLINE_LN" ]; then
-              echo "Pure clean line number locked at: $CMDLINE_LN"
               sed -i "${CMDLINE_LN}a #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\n\tif (static_branch_likely(&susfs_is_fake_cmdline_or_bootconfig_buffer_set)) {\n\t\tsusfs_spoof_cmdline_or_bootconfig(m);\n\t\tseq_printf(m, \"%s\\\\n\");\n\t\treturn 0;\n\t}\n#endif" fs/proc/cmdline.c
             fi
+            monitor_diff "fs/proc/cmdline.c" "fs/proc/cmdline.c - Spoof Cmdline"
           fi
 
           # 【修复 4】全面抢救 fs/proc/task_mmu.c
@@ -117,89 +158,24 @@ jobs:
             sed -i '/if (!rollup_mode)/a #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tif (vma->vm_file) {\n\t\tif (SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n\t\t\treturn 0;\n\t}\n#endif' fs/proc/task_mmu.c
             sed -i '/arch_show_smap(m, vma);/i #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tif (vma->vm_file) {\n\t\tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n\t\t\tgoto bypass_orig_flow;\n\t}\n#endif' fs/proc/task_mmu.c
             sed -i '/m_cache_vma(m, vma);/i #ifdef CONFIG_KSU_SUSFS_SUS_MAP\nbypass_orig_flow:\n#endif' fs/proc/task_mmu.c
+            monitor_diff "fs/proc/task_mmu.c" "fs/proc/task_mmu.c - Task MMU Sus Map"
           fi
 
-          # =====================================================================
-          # 既有正常逻辑：Precision Hook 注入
-          # =====================================================================
-          echo "Modifying drivers/input/input.c safely with clean single-line variables..."
+          # 【修复 5】处理关键的 drivers/input/input.c 挂钩
           if [ -f "drivers/input/input.c" ]; then
+            echo "Modifying drivers/input/input.c safely..."
             BRACE_LINE=$(grep -n "void input_event" drivers/input/input.c | head -n 1 | cut -d: -f1)
             TARGET_OFFSET=$(tail -n +$BRACE_LINE drivers/input/input.c | grep -n "{" | head -n 1 | cut -d: -f1)
             REAL_INJECT_LINE=$((BRACE_LINE + TARGET_OFFSET - 1))
-            
             ANCHOR_LINE=$(grep -n "if (is_event_supported" drivers/input/input.c | head -n 1 | cut -d: -f1)
             
             sed -i "${REAL_INJECT_LINE}s@{ @{ extern bool ksu_input_hook __read_mostly; extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value); @g" drivers/input/input.c
             sed -i "${ANCHOR_LINE}s@{ @{ if (unlikely(ksu_input_hook)) ksu_handle_input_handle_event(\x26type, \x26code, \x26value); @g" drivers/input/input.c
-          fi
-
-          echo "Injecting remaining native ReSukiSU inline hooks into kernel core..."
-          
-          # 1. 挂钩 kernel/sys.c
-          if [ -f "kernel/sys.c" ]; then
-            SYS_LINE=$(grep -n "k_sys_setresuid(uid_t ruid" kernel/sys.c || grep -n "SYSCALL_DEFINE3(setresuid" kernel/sys.c | head -n 1 | cut -d: -f1)
-            if [ ! -z "$SYS_LINE" ]; then
-              SYS_OFFSET=$(tail -n +$SYS_LINE kernel/sys.c | grep -n "{" | head -n 1 | cut -d: -f1)
-              REAL_SYS_LN=$((SYS_LINE + SYS_OFFSET - 1))
-              sed -i "${REAL_SYS_LN}s@{ @{ extern int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid); ksu_handle_setresuid(ruid, euid, suid); @g" kernel/sys.c
-            fi
-          fi
-
-          # 2. 挂钩 kernel/reboot.c
-          if [ -f "kernel/reboot.c" ]; then
-            REBOOT_LINE=$(grep -n "SYSCALL_DEFINE4(reboot" kernel/reboot.c | head -n 1 | cut -d: -f1)
-            if [ ! -z "$REBOOT_LINE" ]; then
-              REBOOT_OFFSET=$(tail -n +$REBOOT_LINE kernel/reboot.c | grep -n "{" | head -n 1 | cut -d: -f1)
-              REAL_REBOOT_LN=$((REBOOT_LINE + REBOOT_OFFSET - 1))
-              sed -i "${REAL_REBOOT_LN}s@{ @{ extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user *arg); ksu_handle_sys_reboot(magic1, magic2, cmd, arg); @g" kernel/reboot.c
-            fi
-          fi
-
-          # 3. fs/open.c
-          if [ -f "fs/open.c" ]; then
-            FAC_LINE=$(grep -n "do_faccessat(int dfd" fs/open.c || grep -n "SYSCALL_DEFINE3(faccessat" fs/open.c | head -n 1 | cut -d: -f1)
-            if [ ! -z "$FAC_LINE" ]; then
-              FAC_OFFSET=$(tail -n +$FAC_LINE fs/open.c | grep -n "{" | head -n 1 | cut -d: -f1)
-              REAL_FAC_LN=$((FAC_LINE + FAC_OFFSET - 1))
-              sed -i "${REAL_FAC_LN}s@{ @{ extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags); ksu_handle_faccessat(\x26dfd, \x26filename, (int *)\x26mode, NULL); @g" fs/open.c
-            fi
-          fi
-
-          # 4. fs/exec.c
-          if [ -f "fs/exec.c" ]; then
-            EXEC_LINE=$(grep -n "do_execveat_common(int dfd" fs/exec.c || grep -n "__do_execveat_file(int dfd" fs/exec.c | head -n 1 | cut -d: -f1)
-            if [ ! -z "$EXEC_LINE" ]; then
-              EXEC_OFFSET=$(tail -n +$EXEC_LINE fs/exec.c | grep -n "{" | head -n 1 | cut -d: -f1)
-              REAL_EXEC_LN=$((EXEC_LINE + EXEC_OFFSET - 1))
-              sed -i "${REAL_EXEC_LN}s@{ @{ extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags); ksu_handle_execveat(\x26fd, \x26filename, \x26argv, \x26envp, \x26flags); @g" fs/exec.c
-            fi
-          fi
-
-          # 5. fs/stat.c
-          if [ -f "fs/stat.c" ]; then
-            STAT_LINE=$(grep -n "vfs_fstatat(int dfd" fs/stat.c || grep -n "vfs_statx(int dfd" fs/stat.c | head -n 1 | cut -d: -f1)
-            if [ ! -z "$STAT_LINE" ]; then
-              STAT_OFFSET=$(tail -n +$STAT_LINE fs/stat.c | grep -n "{" | head -n 1 | cut -d: -f1)
-              REAL_STAT_LN=$((STAT_LINE + STAT_OFFSET - 1))
-              sed -i "${REAL_STAT_LN}s@{ @{ extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags); ksu_handle_stat(\x26dfd, \x26filename, \x26flag); @g" fs/stat.c
-            fi
-          fi
-
-          # 6. fs/read_write.c
-          if [ -f "fs/read_write.c" ]; then
-            VFS_READ_LINE=$(grep -n "ssize_t vfs_read(struct file" fs/read_write.c | head -n 1 | cut -d: -f1)
-            if [ ! -z "$VFS_READ_LINE" ]; then
-              VFS_READ_OFFSET=$(tail -n +$VFS_READ_LINE fs/read_write.c | grep -n "{" | head -n 1 | cut -d: -f1)
-              REAL_VFS_LN=$((VFS_READ_LINE + VFS_READ_OFFSET - 1))
-              sed -i "${REAL_VFS_LN}s@{ @{ extern int ksu_handle_sys_read(struct file **file_ptr, char __user **buf_ptr, size_t *count_ptr, loff_t **pos_ptr); ksu_handle_sys_read(\x26file, (char __user **)\x26buf, \x26count, \x26pos); @g" fs/read_write.c
-            fi
+            monitor_diff "drivers/input/input.c" "drivers/input/input.c - Input Event Hook"
           fi
           
-          # 生成 crux 默认配置
           make O=out ARCH=arm64 crux_defconfig
           
-          # 激活编译配置项
           ./scripts/config --file out/.config \
               -e KSU \
               -e THREAD_INFO_IN_TASK \
@@ -218,7 +194,6 @@ jobs:
 
           make O=out ARCH=arm64 silentoldconfig
 
-          # 正式执行内核编译
           make -j$(nproc --all) \
                       ARCH=arm64 \
                       SUBARCH=arm64 \
@@ -250,24 +225,18 @@ jobs:
           echo "FINAL_ZIP_NAME=${ZIP_FULL}" >> $GITHUB_ENV
           echo "NO_DTB_ZIP_NAME=${ZIP_NODTB}" >> $GITHUB_ENV
           
-          # 克隆两份独立的打包环境
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3_with_dtb
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3_no_dtb
           
-          # 清理无关残留
           rm -rf ak3_with_dtb/.git ak3_with_dtb/README.md ak3_with_dtb/Image* ak3_with_dtb/zImage*
           rm -rf ak3_no_dtb/.git ak3_no_dtb/README.md ak3_no_dtb/Image* ak3_no_dtb/zImage*
           
-          # =====================================================================
-          # 定义动态 anykernel.sh 说明脚本流生成函数 (彻底移除括号、补齐大括号)
-          # =====================================================================
           define_properties() {
             local target_script="$1"
             local track_mode="$2"
             
             echo '# AnyKernel3 Ramdisk Mod Script' > "$target_script"
             echo 'properties() { ' >> "$target_script"
-            # 【核心修正】：用连字符代替任何形式的括号，确保 TWRP 100% 顺畅解析
             echo "kernel.string=Mi9Pro crux ReSukiSU SUSFS - ${track_mode} - ${BUILD_DATE}" >> "$target_script"
             echo 'do.devicecheck=1; do.modules=0; do.systemless=1; do.cleanup=1; do.cleanuponabort=1;' >> "$target_script"
             echo "device.name1=crux" >> "$target_script"
@@ -291,38 +260,22 @@ jobs:
           define_properties "ak3_with_dtb/anykernel.sh" "With-DTB"
           define_properties "ak3_no_dtb/anykernel.sh" "No-DTB"
 
-          # =====================================================================
-          # 精准分发内核核心体 & DTBO 
-          # =====================================================================
-          echo "Distributing kernel artifacts to dual tracks..."
-          
-          # A. 带 DTB 轨：装填 Image.gz-dtb 以及 dtbo.img
           if [ -f "out/arch/arm64/boot/Image.gz-dtb" ]; then
             cp out/arch/arm64/boot/Image.gz-dtb ak3_with_dtb/Image.gz-dtb
-            echo "Image.gz-dtb deployed cleanly to With-DTB track."
           else
             echo "Error: Image.gz-dtb missing!" && exit 1
           fi
           
-          # 捕获编译树里的 dtbo.img 并填入 With-DTB 包中
           if [ -f "out/arch/arm64/boot/dtbo.img" ]; then
             cp out/arch/arm64/boot/dtbo.img ak3_with_dtb/dtbo.img
-            echo "Success: dtbo.img detected and embedded into With-DTB package."
-          else
-            echo "Warning: dtbo.img not found in build output. flash_dtbo configuration adjusted."
           fi
 
-          # B. 不带 DTB 轨：强制纯净化提取与手动压缩
           if [ -f "out/arch/arm64/boot/Image" ]; then
             gzip -c out/arch/arm64/boot/Image > ak3_no_dtb/Image.gz
-            echo "Pure Image.gz successfully squashed for No-DTB track."
           else
             echo "Error: Base Image missing!" && exit 1
           fi
 
-          # =====================================================================
-          # 独立执行双向压缩打包
-          # =====================================================================
           cd ak3_with_dtb
           zip -r ../${ZIP_FULL} *
           cd ..
