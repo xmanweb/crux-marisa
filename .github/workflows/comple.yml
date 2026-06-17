@@ -1,4 +1,4 @@
-name: Compile Crux Kernel (ReSukiSU & SUSFS 2.1 - Native Hook)
+name: "Compile Crux Kernel (ReSukiSU & SUSFS 2.1 - Native Hook)"
 
 on:
   push:
