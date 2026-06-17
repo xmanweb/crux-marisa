@@ -3,7 +3,7 @@ name: Compile Crux Kernel (ReSukiSU & SUSFS 2.1 - Native Hook)
 on:
   push:
     branches:
-      - test
+      - A16-test
   workflow_dispatch:
 
 jobs:
