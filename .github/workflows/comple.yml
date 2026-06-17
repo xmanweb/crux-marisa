@@ -127,6 +127,16 @@ jobs:
             monitor_diff "fs/proc/task_mmu.c" "fs/proc/task_mmu.c - Task MMU Sus Map"
           fi
 
+          # 【手工接盘 4】强行校正 kernel/sys.c (兼容 A11-A15 源码级 uname 伪造)
+          if [ -f "kernel/sys.c" ]; then
+            echo "Manually injecting missing SUSFS spoof_uname logic into kernel/sys.c..."
+            # 1. 注入上半部分外部声明
+            sed -i '/SYSCALL_DEFINE1(newuname/i #ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME\nextern struct static_key_false susfs_is_uname_spoof_buffer_set;\nextern void susfs_spoof_uname(struct new_utsname* tmp);\n#endif' kernel/sys.c
+            # 2. 注入核心拦截逻辑
+            sed -i '/memcpy(&tmp, utsname(), sizeof(tmp));/a #ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME\n\tif (static_branch_likely(&susfs_is_uname_spoof_buffer_set))\n\t\tsusfs_spoof_uname(\&tmp);\n#endif' kernel/sys.c
+            monitor_diff "kernel/sys.c" "kernel/sys.c - Hardcoded Spoof Uname"
+          fi
+
       # =====================================================================
       # PHASE 2: 顺理成章引入外部框架 ReSukiSU
       # =====================================================================
@@ -150,8 +160,7 @@ jobs:
           echo "Executing JackA1ltman inline patch script..."
           bash susfs_inline_hook_patches.sh || echo "Notice: VFS tree adaptation finished."
           
-          # 纠正第三方脚本的历史遗留宏文件拼写碎裂问题
-          find drivers/Kconfig KernelSU/ -type f \( -name "*.c" -o -name "*.h" \) | xargs sed -i 's/linux\/susfs_def.h/linux\/susfs.h/g' 2>/dev/null || true
+          # 🚨 已彻底移除会导致头文件冲突错改的 find/sed 污染语句，完美保留原生 <linux/susfs_def.h> 引用
 
           # =====================================================================
           # 🔍 终极全白盒对账：深度导出所有被自动化脚本动过刀子的源码 diff
@@ -180,9 +189,10 @@ jobs:
           audit_diff "security/selinux/hooks.c"
           audit_diff "kernel/reboot.c"
           audit_diff "kernel/sys.c"
+          audit_diff "drivers/input/input.c"
 
       # =====================================================================
-      # PHASE 4: 最终框架微调与正式 Clang 编译阶段
+      # PHASE 4: 正式 Clang 编译阶段
       # =====================================================================
       - name: Start Kernel Compilation
         run: |
@@ -195,24 +205,6 @@ jobs:
           fi
           export PATH=$REAL_CLANG_PATH:$PATH
 
-          # 【最终安全微调】处理最后的关键文件 drivers/input/input.c 挂钩安全避让并对账
-          if [ -f "drivers/input/input.c" ]; then
-            echo "Modifying drivers/input/input.c safely for final mitigation..."
-            BRACE_LINE=$(grep -n "void input_event" drivers/input/input.c | head -n 1 | cut -d: -f1)
-            TARGET_OFFSET=$(tail -n +$BRACE_LINE drivers/input/input.c | grep -n "{" | head -n 1 | cut -d: -f1)
-            REAL_INJECT_LINE=$((BRACE_LINE + TARGET_OFFSET - 1))
-            ANCHOR_LINE=$(grep -n "if (is_event_supported" drivers/input/input.c | head -n 1 | cut -d: -f1)
-            
-            sed -i "${REAL_INJECT_LINE}s@{ @{ extern bool ksu_input_hook __read_mostly; extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value); @g" drivers/input/input.c
-            sed -i "${ANCHOR_LINE}s@{ @{ if (unlikely(ksu_input_hook)) ksu_handle_input_handle_event(\x26type, \x26code, \x26value); @g" drivers/input/input.c
-            
-            echo "---------------------------------------------------------------------"
-            echo "  🔍 FINAL AUDIT: drivers/input/input.c 合并验证"
-            echo "---------------------------------------------------------------------"
-            git diff drivers/input/input.c
-            echo "---------------------------------------------------------------------"
-          fi
-          
           # 生成 crux 默认配置
           make O=out ARCH=arm64 crux_defconfig
           
