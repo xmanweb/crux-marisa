@@ -50,7 +50,6 @@ jobs:
             for rej in $REJ_FILES_P1; do
               target_file="${rej%.rej}"
               
-              # 【保留对账功能】在看 .rej 之前，先打印出当前文件被 patch 部分合入后的第一现场 diff
               echo "=================================================="
               echo "[FIRST-HAND PATCH DIFF] Original modified state for: ${target_file}"
               echo "=================================================="
@@ -107,20 +106,15 @@ jobs:
             fi
           fi
 
-          # 3. 原始内存映射树（Task MMU）伪装 - 移除一切 sed 范围大括号，改用特异性上下文单行匹配
+          # 3. 完美还原：曾经成功编译过的 task_mmu.c 逻辑位置
           if [ -f "fs/proc/task_mmu.c" ]; then
-            # 注入头文件
-            sed -i '/#include <linux\/uaccess.h>/i #if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)\n#include <linux/susfs.h>\n#endif' fs/proc/task_mmu.c
-            
-            # 避开 show_smap 的大括号区间，直接用 "KernelPageSize:" 这一行作为锚点，往它的上方精准塞入对 show_smap 的第一处拦截！
-            sed -i '/"KernelPageSize: %8lu kB\\n"/i #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tif (vma->vm_file) {\n\t\tif (SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n\t\t\treturn 0;\n\t}\n#endif' fs/proc/task_mmu.c
-            
-            # 定位 arch_show_smap 并追加第二处拦截与 bypass 桩点
+            sed -i '/#include <linux\/uaccess.h>/i #if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)\n#include <linux/susfs.h>\n#endif' fs/task_mmu.c 2>/dev/null || sed -i '/#include <linux\/uaccess.h>/i #if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)\n#include <linux/susfs.h>\n#endif' fs/proc/task_mmu.c
+            sed -i '/if (!rollup_mode)/a #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tif (vma->vm_file) {\n\t\tif (SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n\t\t\treturn 0;\n\t}\n#endif' fs/proc/task_mmu.c
             sed -i '/arch_show_smap(m, vma);/i #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tif (vma->vm_file) {\n\t\tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n\t\t\tgoto bypass_orig_flow;\n\t}\n#endif' fs/proc/task_mmu.c
             sed -i '/m_cache_vma(m, vma);/i #ifdef CONFIG_KSU_SUSFS_SUS_MAP\nbypass_orig_flow:\n#endif' fs/proc/task_mmu.c
           fi
 
-          # 4. 原生系统调用大门口（sys.c）的安全注入 —— 纯单行平铺，无任何大括号
+          # 4. 完美还原：曾经成功编译过的 sys.c 逻辑位置
           if [ -f "kernel/sys.c" ]; then
             sed -i '/SYSCALL_DEFINE1(newuname/i #ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME\nextern struct static_key_false susfs_is_uname_spoof_buffer_set;\nextern void susfs_spoof_uname(struct new_utsname* tmp);\n#endif' kernel/sys.c
             sed -i '/memcpy(&tmp, utsname(), sizeof(tmp));/a #ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME\n\tif (static_branch_likely(&susfs_is_uname_spoof_buffer_set))\n\t\tsusfs_spoof_uname(\&tmp);\n#endif' kernel/sys.c
