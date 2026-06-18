@@ -18,12 +18,18 @@ jobs:
         with:
           ref: A16-test
 
-      - name: Install Build Dependencies
+      - name: Install Dependencies
         run: |
+          # 1. 瞬间将默认源替换为腾讯云镜像源（腾讯云在国际网络和 Actions 节点上非常稳定）
+          sudo sed -i 's/[a-zA-Z0-9.-]*\.archive\.ubuntu\.com/mirrors.tencent.com/g' /etc/apt/sources.list
+          sudo sed -i 's/security\.ubuntu\.com/mirrors.tencent.com/g' /etc/apt/sources.list
+          
+          # 2. 重新跑 update 并安装
           sudo apt-get update
           sudo apt-get install -y bc build-essential libncurses5-dev libssl-dev texinfo \
             libgmp3-dev libmpfr-dev libmpc-dev libcap-dev zlib1g-dev python3 \
             bison flex ccache libelf-dev lz4 liblz4-tool libstdc++6 openjdk-11-jdk zip unzip curl git
+
 
       - name: Fetch ZyC-Clang 16 Toolchain
         run: |
