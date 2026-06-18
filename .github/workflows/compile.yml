@@ -66,7 +66,7 @@ jobs:
             done
           fi
 
-      - name: "PHASE 1.5: Intercept & Manually Rescue Failed Hunks"
+      - name: "PHASE 1.5: Intercept & Manually Rescue Failed Hunks (Precision Audited)"
         run: |
           cd $GITHUB_WORKSPACE
           
@@ -81,7 +81,7 @@ jobs:
               if git diff --quiet "$file_path"; then
                 echo "⚠️ WARNING: No changes detected in ${file_path}! Injection might have failed."
               else
-                echo "✅ SUCCESS: Changes verified in ${file_path}."
+                echo "✅ SUCCESS: Changes verified and structured correctly."
               fi
             else
               echo "❌ ERROR: Target file ${file_path} does not exist!"
@@ -89,16 +89,24 @@ jobs:
             echo "---------------------------------------------------------------------"
           }
 
-          # 1. 原始命名空间挂载恢复
+          # ---------------------------------------------------------------------
+          # 1. 精准修复 fs/namespace.c (展平单行，转义特殊符号，防止 YAML 语法中断)
+          # ---------------------------------------------------------------------
           if [ -f "fs/namespace.c" ]; then
-            sed -i '/int id = mnt->mnt_id;/a #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (mnt->mnt.mnt_flags & VFSMOUNT_MNT_FLAGS_KSU_UNSHARED_MNT)\n\t\treturn;\n#endif' fs/namespace.c
-            sed -i '/if (!ida_pre_get(&mnt_group_ida, GFP_KERNEL))/i #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (susfs_is_current_ksu_domain()) {\n\t\tif (!ida_pre_get(&mnt_group_ida, GFP_KERNEL))\n\t\t\treturn -ENOMEM;\n\t\tres = ida_get_new_above(&mnt_group_ida, DEFAULT_KSU_MNT_GROUP_ID, \&mnt->mnt_group_id);\n\t\tgoto bypass_orig_flow;\n\t}\n#endif' fs/namespace.c
-            sed -i '/res = ida_get_new_above(&mnt_group_ida,/i #ifndef CONFIG_KSU_SUSFS_SUS_MOUNT' fs/namespace.c
-            sed -i '/mnt_group_start = mnt->mnt_group_id + 1;/i #endif\nbypass_orig_flow:' fs/namespace.c
+            echo "🔧 [Fixing] fs/namespace.c..."
+            # 修复 mnt_free_id 释放豁免逻辑
+            sed -i '/VFSMOUNT_MNT_FLAGS_KSU_UNSHARED_MNT/d' fs/namespace.c
+            sed -i '/int id = mnt->mnt_id;/a \\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (mnt->mnt.mnt_flags & VFSMOUNT_MNT_FLAGS_KSU_UNSHARED_MNT)\n\t\treturn;\n#endif' fs/namespace.c
+            
+            # 展平单行机制：定位到 mnt_alloc_group_id 的开放大括号后精准切入
+            sed -i '/static int mnt_alloc_group_id(struct mount \*mnt)/,!b; { /{/a #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (susfs_is_current_ksu_domain()) {\n\t\tint res;\n\t\tif (!ida_pre_get(&mnt_group_ida, GFP_KERNEL))\n\t\t\treturn -ENOMEM;\n\t\tres = ida_get_new_above(&mnt_group_ida, DEFAULT_KSU_MNT_GROUP_ID, \&mnt->mnt_group_id);\n\t\tif (!res)\n\t\t\treturn 0;\n\t}\n#endif' fs/namespace.c
           fi
 
-          # 2. 原始内核命令行 Spoof 注入
+          # ---------------------------------------------------------------------
+          # 2. 精准修复 fs/proc/cmdline.c (内核命令行 Spoof 注入)
+          # ---------------------------------------------------------------------
           if [ -f "fs/proc/cmdline.c" ]; then
+            echo "🔧 [Fixing] fs/proc/cmdline.c..."
             sed -i '/static int cmdline_proc_show/i #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\nextern struct static_key_false susfs_is_fake_cmdline_or_bootconfig_buffer_set;\nextern void susfs_spoof_cmdline_or_bootconfig(struct seq_file *m);\n#endif' fs/proc/cmdline.c
             CMDLINE_LN=$(awk '/static int cmdline_proc_show/,/{/{if($0 ~ /{/){print NR; exit}}' fs/proc/cmdline.c)
             if [ ! -z "$CMDLINE_LN" ]; then
@@ -106,20 +114,51 @@ jobs:
             fi
           fi
 
-          # 3. 完美还原：曾经成功编译过的 task_mmu.c 逻辑位置
+          # ---------------------------------------------------------------------
+          # 3. 精准修复 fs/proc/task_mmu.c (闭合拦截控制流，彻底解决 Maps 隐藏失效)
+          # ---------------------------------------------------------------------
           if [ -f "fs/proc/task_mmu.c" ]; then
-            sed -i '/#include <linux\/uaccess.h>/i #if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)\n#include <linux/susfs.h>\n#endif' fs/task_mmu.c 2>/dev/null || sed -i '/#include <linux\/uaccess.h>/i #if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)\n#include <linux/susfs.h>\n#endif' fs/proc/task_mmu.c
-            sed -i '/if (!rollup_mode)/a #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tif (vma->vm_file) {\n\t\tif (SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n\t\t\treturn 0;\n\t}\n#endif' fs/proc/task_mmu.c
-            sed -i '/arch_show_smap(m, vma);/i #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tif (vma->vm_file) {\n\t\tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n\t\t\tgoto bypass_orig_flow;\n\t}\n#endif' fs/proc/task_mmu.c
-            sed -i '/m_cache_vma(m, vma);/i #ifdef CONFIG_KSU_SUSFS_SUS_MAP\nbypass_orig_flow:\n#endif' fs/proc/task_mmu.c
+            echo "🔧 [Fixing] fs/proc/task_mmu.c..."
+            # 清除死标签残渣
+            sed -i '/bypass_orig_flow:/d' fs/proc/task_mmu.c
+            sed -i '/SUSFS_IS_INODE_SUS_MAP/d' fs/proc/task_mmu.c
+
+            # 兼容注入头文件
+            sed -i '/#include <linux\/uaccess.h>/i #if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)\n#include <linux/susfs.h>\n#endif' fs/proc/task_mmu.c 2>/dev/null || true
+
+            # 在 show_smap 核心起点（Size 打印处）注入强制前置拦截，防止泄露 smap 属性
+            if grep -q "\"Size:           %8lu kB\\\\n\"" fs/proc/task_mmu.c; then
+                sed -i '/"Size:           %8lu kB\\n"/i #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n\t\treturn 0;\n#endif' fs/proc/task_mmu.c
+            fi
+
+            # 分流跳转：在可能被魔改的 arch_show_smap 动作前安插跳转控制
+            if grep -q "arch_show_smap(m, vma);" fs/proc/task_mmu.c; then
+                sed -i '/arch_show_smap(m, vma);/i #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n\t\tgoto bypass_orig_flow;\n#endif' fs/proc/task_mmu.c
+            fi
+
+            # 在 show_smap / show_numa_map 的全局终点 m_cache_vma 前落地闭合标签
+            if grep -q "m_cache_vma(m, vma);" fs/proc/task_mmu.c; then
+                sed -i '/m_cache_vma(m, vma);/i #ifdef CONFIG_KSU_SUSFS_SUS_MAP\nbypass_orig_flow:\n#endif' fs/proc/task_mmu.c
+            fi
           fi
 
-          # 4. 完美还原：曾经成功编译过的 sys.c 逻辑位置
+          # ---------------------------------------------------------------------
+          # 4. 精准修复 kernel/sys.c (保护锁区段，阻断 bpfloader 引起的死锁)
+          # ---------------------------------------------------------------------
           if [ -f "kernel/sys.c" ]; then
+            echo "🔧 [Fixing] kernel/sys.c..."
+            sed -i '/susfs_spoof_uname/d' kernel/sys.c
             sed -i '/SYSCALL_DEFINE1(newuname/i #ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME\nextern struct static_key_false susfs_is_uname_spoof_buffer_set;\nextern void susfs_spoof_uname(struct new_utsname* tmp);\n#endif' kernel/sys.c
+            
+            # 紧贴数据复制完成行进行注入，处于锁保护中且在厂商提前返回拦截点上方
             sed -i '/memcpy(&tmp, utsname(), sizeof(tmp));/a #ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME\n\tif (static_branch_likely(&susfs_is_uname_spoof_buffer_set))\n\t\tsusfs_spoof_uname(\&tmp);\n#endif' kernel/sys.c
           fi
 
+          # 强制清理现场，彻底断绝剩余未解决的 .rej / .orig 阻碍后续编译进行
+          find . -name "*.rej" -delete
+          find . -name "*.orig" -delete
+
+          echo "====== 验证 1.5 阶段精准重构审计结果 ======"
           monitor_diff "fs/namespace.c" "fs/namespace.c Injection Status"
           monitor_diff "fs/proc/cmdline.c" "fs/proc/cmdline.c Injection Status"
           monitor_diff "fs/proc/task_mmu.c" "fs/proc/task_mmu.c Injection Status"
