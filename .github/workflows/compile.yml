@@ -90,7 +90,7 @@ jobs:
           }
 
           # ---------------------------------------------------------------------
-          # 1. 精准修复 fs/namespace.c (展平单行，转义特殊符号，防止 YAML 语法中断)
+          # 1. 精准修复 fs/namespace.c (改用标准安全 append 语法，彻底解决表达式字符报错)
           # ---------------------------------------------------------------------
           if [ -f "fs/namespace.c" ]; then
             echo "🔧 [Fixing] fs/namespace.c..."
@@ -98,8 +98,8 @@ jobs:
             sed -i '/VFSMOUNT_MNT_FLAGS_KSU_UNSHARED_MNT/d' fs/namespace.c
             sed -i '/int id = mnt->mnt_id;/a \\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (mnt->mnt.mnt_flags & VFSMOUNT_MNT_FLAGS_KSU_UNSHARED_MNT)\n\t\treturn;\n#endif' fs/namespace.c
             
-            # 展平单行机制：定位到 mnt_alloc_group_id 的开放大括号后精准切入
-            sed -i '/static int mnt_alloc_group_id(struct mount \*mnt)/,!b; { /{/a #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (susfs_is_current_ksu_domain()) {\n\t\tint res;\n\t\tif (!ida_pre_get(&mnt_group_ida, GFP_KERNEL))\n\t\t\treturn -ENOMEM;\n\t\tres = ida_get_new_above(&mnt_group_ida, DEFAULT_KSU_MNT_GROUP_ID, \&mnt->mnt_group_id);\n\t\tif (!res)\n\t\t\treturn 0;\n\t}\n#endif' fs/namespace.c
+            # 使用标准的 a 命令追加在函数定义的下一行，避开复杂的大括号和逗号控制流
+            sed -i '/static int mnt_alloc_group_id(struct mount \*mnt)/a #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (susfs_is_current_ksu_domain()) {\n\t\tint res;\n\t\tif (!ida_pre_get(&mnt_group_ida, GFP_KERNEL))\n\t\t\treturn -ENOMEM;\n\t\tres = ida_get_new_above(&mnt_group_ida, DEFAULT_KSU_MNT_GROUP_ID, \&mnt->mnt_group_id);\n\t\tif (!res)\n\t\t\treturn 0;\n\t}\n#endif' fs/namespace.c
           fi
 
           # ---------------------------------------------------------------------
