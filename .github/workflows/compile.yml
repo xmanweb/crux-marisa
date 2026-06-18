@@ -122,7 +122,7 @@ jobs:
             echo '{' >> fs/proc/cmdline.c
             echo '#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG' >> fs/proc/cmdline.c
             printf "\tif (static_branch_likely(&susfs_is_fake_cmdline_or_bootconfig_buffer_set)) {\n" >> fs/proc/cmdline.c
-            printf "\t\tsusfs_spoof_cmdline_or_bootconfig(m);\n" >> fs/proc/cmdline.c
+            printf "\t\tsusfs_spoof_cmdline_or_bootconfig(m);\n" >> fs/proc/command_line
             printf "\t\tseq_printf(m, \"%%s\\\\n\");\n" >> fs/proc/cmdline.c
             printf "\t\treturn 0;\n" >> fs/proc/cmdline.c
             printf "\t}\n" >> fs/proc/cmdline.c
@@ -156,25 +156,26 @@ jobs:
           fi
 
           # ---------------------------------------------------------------------
-          # 3. 完美重写 fs/proc/task_mmu.c (全面补正因厂商魔改导致的四大崩溃处)
+          # 3. 完美重写 fs/proc/task_mmu.c (全面移除含逗号的多行模式匹配，改用超稳健注入)
           # ---------------------------------------------------------------------
           if [ -f "fs/proc/task_mmu.c" ]; then
             echo "🔧 [Fixing] fs/proc/task_mmu.c..."
             git checkout fs/proc/task_mmu.c 2>/dev/null || true
 
+            # 3.1 注入头文件
             sed -i '/#include <linux\/uaccess.h>/i #if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)\n#include <linux/susfs.h>\n#endif' fs/proc/task_mmu.c
 
+            # 3.2 补正 show_map_vma 里的条件返回体
             sed -i '/struct inode \*inode = file_inode(vma->vm_file);/a #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\t\tif (SUSFS_IS_INODE_SUS_MAP(inode))\n\t\t\treturn;\n#endif' fs/proc/task_mmu.c
 
-            if grep -q "static int show_smap(struct seq_file \*m, void \*v)" fs/proc/task_mmu.c; then
-                sed -i '/static int show_smap(struct seq_file \*m, void \*v)/,!b; /{/a #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tstruct vm_area_struct *vma = v;\n\tif (vma && vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n\t\treturn 0;\n#endif' fs/proc/task_mmu.c
-            fi
+            # 3.3 极其安全的 show_smap 劫持（放弃 ,!b 语法，改用单纯的行尾匹配后追加）
+            sed -i '/static int show_smap(struct seq_file \*m, void \*v)/a #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tstruct vm_area_struct *vma = v;\n\tif (vma && vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n\t\treturn 0;\n#endif' fs/proc/task_mmu.c
 
+            # 3.4 纠正 pagemap_read 的安全释放信号量与跳转过滤
             sed -i '/down_read(&mm->mmap_sem);/a #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\t\tvma = find_vma(mm, start_vaddr);\n\t\tif (vma && vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))) {\n\t\t\tup_read(&mm->mmap_sem);\n\t\t\tstart_vaddr = end;\n\t\t\tcontinue;\n\t\t}\n#endif' fs/proc/task_mmu.c
 
-            if grep -q "static int show_numa_map(struct seq_file \*m, void \*v)" fs/proc/task_mmu.c; then
-                sed -i '/static int show_numa_map(struct seq_file \*m, void \*v)/,!b; /{/a #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tstruct vm_area_struct *vma = v;\n\tif (vma && vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n\t\treturn 0;\n#endif' fs/proc/task_mmu.c
-            fi
+            # 3.5 极其安全的 show_numa_map 劫持（采用纯名称行追加，避免逗号分裂）
+            sed -i '/static int show_numa_map(struct seq_file \*m, void \*v)/a #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tstruct vm_area_struct *vma = v;\n\tif (vma && vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n\t\treturn 0;\n#endif' fs/proc/task_mmu.c
           fi
 
           # ---------------------------------------------------------------------
@@ -184,9 +185,11 @@ jobs:
             echo "🔧 [Fixing] kernel/sys.c..."
             git checkout kernel/sys.c 2>/dev/null || true
             
+            # SYSCALL_DEFINE1(newuname)
             sed -i '/SYSCALL_DEFINE1(newuname/i #ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME\nextern struct static_key_false susfs_is_uname_spoof_buffer_set;\nextern void susfs_spoof_uname(struct new_utsname* tmp);\n#endif' kernel/sys.c
             sed -i '/memcpy(&tmp, utsname(), sizeof(tmp));/a #ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME\n\tif (static_branch_likely(&susfs_is_uname_spoof_buffer_set))\n\t\tsusfs_spoof_uname(\&tmp);\n#endif' kernel/sys.c
             
+            # SYSCALL_DEFINE1(uname)
             sed -i '/SYSCALL_DEFINE1(uname/i #ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME\nextern struct static_key_false susfs_is_uname_spoof_buffer_set;\nextern void susfs_spoof_uname(struct new_utsname* tmp);\n#endif' kernel/sys.c
           fi
 
@@ -308,7 +311,7 @@ jobs:
             echo '# AnyKernel3 Ramdisk Mod Script' > "$target_script"
             echo 'properties() { ' >> "$target_script"
             echo "kernel.string=Mi9Pro crux ReSukiSU SUSFS - ${track_mode} - ${BUILD_DATE}" >> "$target_script"
-            echo 'do.devicecheck=1; do.modules=0; do.systemless=1; do.cleanup=1; do.cleanuponabort=1;' >> "$target_script"
+            echo 'do.devicecheck=1; do.modules=0; do.systemless=1; do.cleanup=1; do.cleanupunabort=1;' >> "$target_script"
             echo "device.name1=crux" >> "$target_script"
             echo '} ' >> "$target_script"
             echo 'BLOCK=boot; IS_SLOT_DEVICE=0; RAMDISK_COMPRESSION=auto; PATCH_VBMETA_FLAG=auto;' >> "$target_script"
