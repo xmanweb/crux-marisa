@@ -26,7 +26,7 @@ if [ -f "$NAMESPACE_C" ]; then
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (mnt->mnt.mnt_flags \& VFSMOUNT_MNT_FLAGS_KSU_UNSHARED_MNT)\n\t\treturn;\n#endif
 }' "$NAMESPACE_C"
 
-    # C. mnt_alloc_group_id 特权分配拦截 (调整变量声明位置到函数体第一步，解决 C99 冲突)
+    # C. mnt_alloc_group_id 特权分配拦截
     sed -i '/static int mnt_alloc_group_id(struct mount \*mnt)/{n;a \
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tint res_ksu;\n\tif (susfs_is_current_ksu_domain()) {\n\t\tif (!ida_pre_get(\&mnt_group_ida, GFP_KERNEL))\n\t\t\treturn -ENOMEM;\n\t\tres_ksu = ida_get_new_above(\&mnt_group_ida, DEFAULT_KSU_MNT_GROUP_ID, \&mnt->mnt_group_id);\n\t\tif (!res_ksu)\n\t\t\treturn 0;\n\t}\n#endif
 }' "$NAMESPACE_C"
@@ -36,25 +36,18 @@ if [ -f "$NAMESPACE_C" ]; then
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (mnt->mnt_group_id == DEFAULT_KSU_MNT_GROUP_ID)\n\t\treturn;\n#endif
 }' "$NAMESPACE_C"
 
-    # E. clone_mnt 变量声明注入 (将 bool 声明强制塞到 clone_mnt 的入口变量定义区，斩断 C99 告警)
+    # E. 绝杀 clone_mnt（锁定唯一行 int err; 直接改写后面的整段逻辑，不再给 sed 二次触发的机会）
     sed -i '/struct mount \*clone_mnt(struct mount \*old, struct dentry \*root,/,/int err;/ {
         /int err;/a \
-#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tbool is_mnt_ksu_unshared = false;\n#endif
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tbool is_mnt_ksu_unshared = false;\n\tif (static_branch_unlikely(\&susfs_is_sdcard_android_data_not_decrypted)) {\n\t\tif (susfs_is_current_ksu_domain()) {\n\t\t\fif (flag \& CL_COPY_MNT_NS) {\n\t\t\t\tmnt = susfs_alloc_unshare_ksu_vfsmnt(old->mnt_devname, old->mnt_id);\n\t\t\t\tis_mnt_ksu_unshared = true;\n\t\t\t\tgoto bypass_orig_flow;\n\t\t\t}\n\t\t\tmnt = susfs_alloc_non_unshare_ksu_vfsmnt(old->mnt_devname);\n\t\t\tgoto bypass_orig_flow;\n\t\t}\n\t}\n\tif (old->mnt_id >= DEFAULT_KSU_MNT_ID) {\n\t\tmnt = susfs_alloc_non_unshare_ksu_vfsmnt(old->mnt_devname);\n\t\t\tgoto bypass_orig_flow;\n\t}\n#endif
     }' "$NAMESPACE_C"
 
-    # F. clone_mnt 核心代码区间内包裹 (限定在 clone_mnt 作用域内，仅处理第一处 alloc_vfsmnt)
-    sed -i '/struct mount \*clone_mnt(struct mount \*old, struct dentry \*root,/,/return mnt;/ {
-        /mnt = alloc_vfsmnt(old->mnt_devname);/i \
-#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (static_branch_unlikely(\&susfs_is_sdcard_android_data_not_decrypted)) {\n\t\tif (susfs_is_current_ksu_domain()) {\n\t\t\fif (flag \& CL_COPY_MNT_NS) {\n\t\t\t\tmnt = susfs_alloc_unshare_ksu_vfsmnt(old->mnt_devname, old->mnt_id);\n\t\t\t\tis_mnt_ksu_unshared = true;\n\t\t\t\tgoto bypass_orig_flow;\n\t\t\t}\n\t\t\tmnt = susfs_alloc_non_unshare_ksu_vfsmnt(old->mnt_devname);\n\t\t\tgoto bypass_orig_flow;\n\t\t}\n\t}\n\tif (old->mnt_id >= DEFAULT_KSU_MNT_ID) {\n\t\tmnt = susfs_alloc_non_unshare_ksu_vfsmnt(old->mnt_devname);\n\t\tgoto bypass_orig_flow;\n\t}\n#endif
-        /mnt = alloc_vfsmnt(old->mnt_devname);/a \
-#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\nbypass_orig_flow:\n#endif
-    }' "$NAMESPACE_C"
+    # F. 在第一处将要调用原厂分配的行前方（即我们的劫持目的标签）进行拦截
+    # 利用精确替换，将原厂行直接转换为带有单次标签的形式，彻底消除了重复多杀
+    sed -i 's/mnt = alloc_vfsmnt(old->mnt_devname);/#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\nbypass_orig_flow:\n#endif\n\tmnt = alloc_vfsmnt(old->mnt_devname);/1' "$NAMESPACE_C"
 
-    # G. 旗标注入 (同样加入区间锁，防止误伤后面的同名赋值)
-    sed -i '/struct mount \*clone_mnt(struct mount \*old, struct dentry \*root,/,/return mnt;/ {
-        /mnt->mnt.mnt_flags = old->mnt.mnt_flags;/a \
-\tmnt->mnt.mnt_flags \&= ~(MNT_WRITE_HOLD|MNT_MARKED|MNT_INTERNAL);\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (unlikely(is_mnt_ksu_unshared))\n\t\tmnt->mnt.mnt_flags |= VFSMOUNT_MNT_FLAGS_KSU_UNSHARED_MNT;\n#endif
-    }' "$NAMESPACE_C"
+    # G. 限制第一处旗标修改的注入，同样只处理发现的第一匹配项（使用 s/.../.../1 旗标）
+    sed -i 's/mnt->mnt.mnt_flags = old->mnt.mnt_flags;/mnt->mnt.mnt_flags = old->mnt.mnt_flags;\n\tmnt->mnt.mnt_flags \&= ~(MNT_WRITE_HOLD|MNT_MARKED|MNT_INTERNAL);\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (unlikely(is_mnt_ksu_unshared))\n\t\tmnt->mnt.mnt_flags |= VFSMOUNT_MNT_FLAGS_KSU_UNSHARED_MNT;\n#endif/1' "$NAMESPACE_C"
 
     echo "✅ $NAMESPACE_C sed patched flawlessly."
 fi
@@ -64,14 +57,12 @@ fi
 # ---------------------------------------------------------------------
 if [ -f "$CMDLINE_C" ]; then
     echo "⚙️ sed aligning: $CMDLINE_C ..."
-    
     sed -i '/static int cmdline_proc_show/i \
 #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\nextern struct static_key_false susfs_is_fake_cmdline_or_bootconfig_buffer_set;\nextern void susfs_spoof_cmdline_or_bootconfig(struct seq_file *m);\n#endif\n' "$CMDLINE_C"
 
     sed -i '/static int cmdline_proc_show/{n;a \
 #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\n\tif (static_branch_likely(\&susfs_is_fake_cmdline_or_bootconfig_buffer_set)) {\n\t\tsusfs_spoof_cmdline_or_bootconfig(m);\n\t\tseq_printf(m, "%s\\n");\n\t\treturn 0;\n\t}\n#endif
 }' "$CMDLINE_C"
-    
     echo "✅ $CMDLINE_C sed patched flawlessly."
 fi
 
@@ -80,14 +71,12 @@ fi
 # ---------------------------------------------------------------------
 if [ -f "$TASK_MMU_C" ]; then
     echo "⚙️ sed aligning: $TASK_MMU_C ..."
-    
     sed -i '/#include <linux\/ctype.h>/a \
 #if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)\n#include <linux/susfs.h>\n#endif' "$TASK_MMU_C"
 
     sed -i '/static int show_smap(struct seq_file \*m, void \*v)/{n;a \
 #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tstruct vm_area_struct *vma_ksu = v;\n\tif (vma_ksu \&\& vma_ksu->vm_file) {\n\t\tif (SUSFS_IS_INODE_SUS_MAP(file_inode(vma_ksu->vm_file)))\n\t\t\treturn 0;\n\t}\n#endif
 }' "$TASK_MMU_C"
-    
     echo "✅ $TASK_MMU_C sed patched flawlessly."
 fi
 
@@ -96,13 +85,11 @@ fi
 # ---------------------------------------------------------------------
 if [ -f "$SYS_C" ]; then
     echo "⚙️ sed aligning: $SYS_C ..."
-    
     sed -i '/SYSCALL_DEFINE1(newuname/i \
 #ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME\nextern struct static_key_false susfs_is_uname_spoof_buffer_set;\nextern void susfs_spoof_uname(struct new_utsname* tmp);\n#endif' "$SYS_C"
 
     sed -i '/memcpy(&tmp, utsname(), sizeof(tmp));/a \
 #ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME\n\tif (static_branch_likely(\&susfs_is_uname_spoof_buffer_set))\n\t\tsusfs_spoof_uname(\&tmp);\n#endif' "$SYS_C"
-    
     echo "✅ $SYS_C sed patched flawlessly."
 fi
 
