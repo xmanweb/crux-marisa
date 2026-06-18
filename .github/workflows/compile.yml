@@ -63,18 +63,23 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE
           
-          # 定义高通 4.14 满血版核心源码监控函数（用来在 CI 日志中 Dump 关键段落，确认代码未静默搞丢）
           monitor_diff() {
-            local target_file=$1
-            local label=$2
-            echo "----------------------------------------"
-            echo "[DUMP DIAGNOSTIC] Auditing source segment for: ${label}"
-            if [ -f "${target_file}" ]; then
-              grep -n -C 5 -E "ksu_handle|CONFIG_KSU|susfs_|LINUX_REBOOT|bypass_orig_flow|VFSMOUNT_MNT_FLAGS_KSU_UNSHARED_MNT" "${target_file}" || true
+            local file_path="$1"
+            local patch_title="$2"
+            echo "---------------------------------------------------------------------"
+            echo "  🔍 MONITORING: ${patch_title}"
+            echo "---------------------------------------------------------------------"
+            if [ -f "$file_path" ]; then
+              git diff "$file_path" || true
+              if git diff --quiet "$file_path"; then
+                echo "⚠️ WARNING: No changes detected in ${file_path}! Injection might have failed."
+              else
+                echo "✅ SUCCESS: Changes verified in ${file_path}."
+              fi
             else
-              echo "[WARNING] ${target_file} not found for dumping."
+              echo "❌ ERROR: Target file ${file_path} does not exist!"
             fi
-            echo "----------------------------------------"
+            echo "---------------------------------------------------------------------"
           }
 
           # 1. 原始命名空间挂载恢复
@@ -108,11 +113,10 @@ jobs:
             sed -i '/memcpy(&tmp, utsname(), sizeof(tmp));/a #ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME\n\tif (static_branch_likely(&susfs_is_uname_spoof_buffer_set))\n\t\tsusfs_spoof_uname(\&tmp);\n#endif' kernel/sys.c
           fi
 
-          # 在 Phase 1.5 结束时，对所有 4 个手工注入的文件进行全量对账快照 Dump
-          monitor_diff "fs/namespace.c" "Phase 1.5 - fs/namespace.c"
-          monitor_diff "fs/proc/cmdline.c" "Phase 1.5 - fs/proc/cmdline.c"
-          monitor_diff "fs/proc/task_mmu.c" "Phase 1.5 - fs/proc/task_mmu.c"
-          monitor_diff "kernel/sys.c" "Phase 1.5 - kernel/sys.c"
+          monitor_diff "fs/namespace.c" "fs/namespace.c Injection Status"
+          monitor_diff "fs/proc/cmdline.c" "fs/proc/cmdline.c Injection Status"
+          monitor_diff "fs/proc/task_mmu.c" "fs/proc/task_mmu.c Injection Status"
+          monitor_diff "kernel/sys.c" "kernel/sys.c Injection Status"
 
       - name: "PHASE 2: Integrate Official ReSukiSU"
         run: |
@@ -126,23 +130,35 @@ jobs:
           chmod +x susfs_inline_hook_patches.sh
           bash susfs_inline_hook_patches.sh || echo "Notice: VFS tree adaptation finished."
 
-          # 【干净纯粹】移除无效的 .rej 扫描逻辑，直接进入最后的 git diff 全量对账
-          echo "====== FINAL SOURCE DUMP AUDIT ======"
-          audit_diff() {
+          # 【完美复用】直接在 PHASE 3 声明并挂载 monitor_diff 机制
+          monitor_diff() {
             local file_path="$1"
-            if [ -f "${file_path}" ]; then
-              echo "[FINAL AUDIT LOG FOR: ${file_path}]"
-              git diff "${file_path}" || true
+            local patch_title="$2"
+            echo "---------------------------------------------------------------------"
+            echo "  🔍 MONITORING: ${patch_title}"
+            echo "---------------------------------------------------------------------"
+            if [ -f "$file_path" ]; then
+              git diff "$file_path" || true
+              if git diff --quiet "$file_path"; then
+                echo "⚠️ WARNING: No changes detected in ${file_path}! Inline script might have skipped it."
+              else
+                echo "✅ SUCCESS: VFS changes verified in ${file_path}."
+              fi
+            else
+              echo "❌ ERROR: Target file ${file_path} does not exist!"
             fi
+            echo "---------------------------------------------------------------------"
           }
-          audit_diff "fs/exec.c"
-          audit_diff "fs/open.c"
-          audit_diff "fs/read_write.c"
-          audit_diff "fs/stat.c"
-          audit_diff "security/selinux/hooks.c"
-          audit_diff "kernel/reboot.c"
-          audit_diff "kernel/sys.c"
-          audit_diff "drivers/input/input.c"
+
+          echo "====== FINAL SOURCE DUMP AUDIT ======"
+          monitor_diff "fs/exec.c" "Final Check - fs/exec.c Inline Hook"
+          monitor_diff "fs/open.c" "Final Check - fs/open.c Inline Hook"
+          monitor_diff "fs/read_write.c" "Final Check - fs/read_write.c Inline Hook"
+          monitor_diff "fs/stat.c" "Final Check - fs/stat.c Inline Hook"
+          monitor_diff "security/selinux/hooks.c" "Final Check - SELinux Hooks"
+          monitor_diff "kernel/reboot.c" "Final Check - kernel/reboot.c Inline Hook"
+          monitor_diff "kernel/sys.c" "Final Check - kernel/sys.c Inline Hook"
+          monitor_diff "drivers/input/input.c" "Final Check - Input Device Hook"
           echo "====== Final Audit Complete ======"
 
       - name: Start Kernel Compilation
