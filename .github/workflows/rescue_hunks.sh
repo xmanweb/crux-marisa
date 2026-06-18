@@ -1,65 +1,108 @@
-#!/bin/bash
-# .github/workflows/rescue_hunks.sh
+#!/bin/sh
+# =====================================================================
+#  🚀 [RESCUE HUNKS ENGINE] AUTOMATED sed PATCH ALIGNMENT SCRIPT (CI/CD)
+# =====================================================================
+
 set -e
 
-echo "🚀 [Script Engine] Executing zero-brace precision patch execution..."
+NAMESPACE_C="fs/namespace.c"
+CMDLINE_C="fs/proc/cmdline.c"
+TASK_MMU_C="fs/proc/task_mmu.c"
+SYS_C="kernel/sys.c"
 
-# =====================================================================
-# 1. 严格修复 fs/proc/cmdline.c
-# =====================================================================
-echo "🔧 [Fixing] fs/proc/cmdline.c..."
+echo "====================================================================="
+# ---------------------------------------------------------------------
+#  1. 修补 fs/namespace.c
+# ---------------------------------------------------------------------
+if [ -f "$NAMESPACE_C" ]; then
+    echo "⚙️ sed aligning: $NAMESPACE_C ..."
 
-sed -i '/static int cmdline_proc_show/i #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\nextern struct static_key_false susfs_is_fake_cmdline_or_bootconfig_buffer_set;\nextern void susfs_spoof_cmdline_or_bootconfig(struct seq_file *m);\n#endif\n' fs/proc/cmdline.c
+    # A. 头部结构和定义注入
+    sed -i '/#include "internal.h"/a \
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n#ifndef VFSMOUNT_MNT_FLAGS_KSU_UNSHARED_MNT\n#define VFSMOUNT_MNT_FLAGS_KSU_UNSHARED_MNT BIT(24)\n#endif\n#ifndef DEFAULT_KSU_MNT_GROUP_ID\n#define DEFAULT_KSU_MNT_GROUP_ID (100000)\n#endif\nextern bool susfs_is_current_ksu_domain(void);\nextern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;\n#define CL_COPY_MNT_NS BIT(25)\n#endif' "$NAMESPACE_C"
 
-sed -i '/static int cmdline_proc_show(struct seq_file \*m, void \*v)/!b;n;a #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\n\tif (static_branch_likely(&susfs_is_fake_cmdline_or_bootconfig_buffer_set)) {\n\t\tsusfs_spoof_cmdline_or_bootconfig(m);\n\t\tseq_printf(m, "%s\\n");\n\t\treturn 0;\n\t}\n#endif' fs/proc/cmdline.c
+    # B. mnt_free_id 顶部拦截
+    sed -i '/static void mnt_free_id(struct mount \*mnt)/,/{/ {
+        /{/a \
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (mnt->mnt.mnt_flags & VFSMOUNT_MNT_FLAGS_KSU_UNSHARED_MNT)\n\t\treturn;\n#endif
+    }' "$NAMESPACE_C"
 
+    # C. mnt_alloc_group_id 特权分配拦截
+    sed -i '/static int mnt_alloc_group_id(struct mount \*mnt)/,/{/ {
+        /{/a \
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (susfs_is_current_ksu_domain()) {\n\t\tint res_ksu;\n\t\tif (!ida_pre_get(\&mnt_group_ida, GFP_KERNEL))\n\t\t\treturn -ENOMEM;\n\t\tres_ksu = ida_get_new_above(\&mnt_group_ida, DEFAULT_KSU_MNT_GROUP_ID, \&mnt->mnt_group_id);\n\t\tif (!res_ksu)\n\t\t\treturn 0;\n\t}\n#endif' "$NAMESPACE_C"
 
-# =====================================================================
-# 2. 精准修复 fs/namespace.c (保持完美洗白状态)
-# =====================================================================
-echo "🔧 [Fixing] fs/namespace.c..."
+    # D. mnt_release_group_id 防火墙
+    sed -i '/void mnt_release_group_id(struct mount \*mnt)/,/{/ {
+        /{/a \
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (mnt->mnt_group_id == DEFAULT_KSU_MNT_GROUP_ID)\n\t\treturn;\n#endif' "$NAMESPACE_C"
 
-sed -i '/#include "internal.h"/a #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n#ifndef VFSMOUNT_MNT_FLAGS_KSU_UNSHARED_MNT\n#define VFSMOUNT_MNT_FLAGS_KSU_UNSHARED_MNT BIT(24)\n#endif\n#ifndef DEFAULT_KSU_MNT_GROUP_ID\n#define DEFAULT_KSU_MNT_GROUP_ID (100000)\n#endif\n#endif' fs/namespace.c
+    # E. clone_mnt 核心代码精细前后包裹与 UNSHARED 旗标注入
+    sed -i '/mnt = alloc_vfsmnt(old->mnt_devname);/i \
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tbool is_mnt_ksu_unshared = false;\n\tif (static_branch_unlikely(\&susfs_is_sdcard_android_data_not_decrypted)) {\n\t\tif (susfs_is_current_ksu_domain()) {\n\t\t\fif (flag \& CL_COPY_MNT_NS) {\n\t\t\t\tmnt = susfs_alloc_unshare_ksu_vfsmnt(old->mnt_devname, old->mnt_id);\n\t\t\t\tis_mnt_ksu_unshared = true;\n\t\t\t\tgoto bypass_orig_flow;\n\t\t\t}\n\t\t\tmnt = susfs_alloc_non_unshare_ksu_vfsmnt(old->mnt_devname);\n\t\t\tgoto bypass_orig_flow;\n\t\t}\n\t}\n\tif (old->mnt_id >= DEFAULT_KSU_MNT_ID) {\n\t\tmnt = susfs_alloc_non_unshare_ksu_vfsmnt(old->mnt_devname);\n\t\tgoto bypass_orig_flow;\n\t}\n#endif' "$NAMESPACE_C"
 
-sed -i 's/static void mnt_free_id(struct mount \*mnt)/static void mnt_free_id(struct mount \*mnt)\n{\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (mnt->mnt.mnt_flags \& VFSMOUNT_MNT_FLAGS_KSU_UNSHARED_MNT)\n\t\treturn;\n#endif/g' fs/namespace.c
-sed -i '/#endif/{n;s/^{//}' fs/namespace.c
+    sed -i '/mnt = alloc_vfsmnt(old->mnt_devname);/a \
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\nbypass_orig_flow:\n#endif' "$NAMESPACE_C"
 
-sed -i 's/static int mnt_alloc_group_id(struct mount \*mnt)/static int mnt_alloc_group_id(struct mount \*mnt)\n{\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (susfs_is_current_ksu_domain()) {\n\t\tint res_ksu;\n\t\tif (!ida_pre_get(\&mnt_group_ida, GFP_KERNEL))\n\t\t\treturn -ENOMEM;\n\t\tres_ksu = ida_get_new_above(\&mnt_group_ida, DEFAULT_KSU_MNT_GROUP_ID, \&mnt->mnt_group_id);\n\t\tif (!res_ksu)\n\t\t\treturn 0;\n\t}\n#endif/g' fs/namespace.c
-sed -i '/#endif/{n;s/^{//}' fs/namespace.c
+    sed -i '/mnt->mnt.mnt_flags = old->mnt.mnt_flags;/a \
+\tmnt->mnt.mnt_flags \&= ~(MNT_WRITE_HOLD|MNT_MARKED|MNT_INTERNAL);\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (unlikely(is_mnt_ksu_unshared))\n\t\tmnt->mnt.mnt_flags |= VFSMOUNT_MNT_FLAGS_KSU_UNSHARED_MNT;\n#endif' "$NAMESPACE_C"
 
-sed -i 's/void mnt_release_group_id(struct mount \*mnt)/void mnt_release_group_id(struct mount \*mnt)\n{\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (mnt->mnt_group_id == DEFAULT_KSU_MNT_GROUP_ID)\n\t\treturn;\n#endif/g' fs/namespace.c
-sed -i '/#endif/{n;s/^{//}' fs/namespace.c
+    echo "✅ $NAMESPACE_C sed patched flawlessly."
+fi
 
+# ---------------------------------------------------------------------
+#  2. 修补 fs/proc/cmdline.c
+# ---------------------------------------------------------------------
+if [ -f "$CMDLINE_C" ]; then
+    echo "⚙️ sed aligning: $CMDLINE_C ..."
+    
+    # 插入 extern 声明
+    sed -i '/static int cmdline_proc_show/i \
+#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\nextern struct static_key_false susfs_is_fake_cmdline_or_bootconfig_buffer_set;\nextern void susfs_spoof_cmdline_or_bootconfig(struct seq_file *m);\n#endif\n' "$CMDLINE_C"
 
-# =====================================================================
-# 3. 严格修复 fs/proc/task_mmu.c
-# =====================================================================
-echo "🔧 [Fixing] fs/proc/task_mmu.c..."
+    # 在函数入口的大括号后面注入劫持阻断
+    sed -i '/static int cmdline_proc_show/,/{/ {
+        /{/a \
+#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\n\tif (static_branch_likely(\&susfs_is_fake_cmdline_or_bootconfig_buffer_set)) {\n\t\tsusfs_spoof_cmdline_or_bootconfig(m);\n\t\tseq_printf(m, "%s\\n");\n\t\treturn 0;\n\t}\n#endif' "$CMDLINE_C"
+    
+    echo "✅ $CMDLINE_C sed patched flawlessly."
+fi
 
-sed -i '/#include <linux\/ctype.h>/a #if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)\n#include <linux/susfs.h>\n#endif' fs/proc/task_mmu.c
+# ---------------------------------------------------------------------
+#  3. 修补 fs/proc/task_mmu.c (完全阻断 smaps 侧信道泄漏)
+# ---------------------------------------------------------------------
+if [ -f "$TASK_MMU_C" ]; then
+    echo "⚙️ sed aligning: $TASK_MMU_C ..."
+    
+    # A. 头文件追加
+    sed -i '/#include <linux\/ctype.h>/a \
+#if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)\n#include <linux/susfs.h>\n#endif' "$TASK_MMU_C"
 
-sed -i '/show_smap_vma_flags(m, vma);/i #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tif (vma->vm_file) {\n\t\tif (SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n\t\t\tgoto bypass_orig_flow;\n\t}\n#endif' fs/proc/task_mmu.c
+    # B. 入口绝杀 smaps 扫描
+    sed -i '/static int show_smap(struct seq_file \*m, void \*v)/,/{/ {
+        /{/a \
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tstruct vm_area_struct *vma_ksu = v;\n\tif (vma_ksu \&\& vma_ksu->vm_file) {\n\t\tif (SUSFS_IS_INODE_SUS_MAP(file_inode(vma_ksu->vm_file)))\n\t\t\treturn 0;\n\t}\n#endif' "$TASK_MMU_C"
+    
+    echo "✅ $TASK_MMU_C sed patched flawlessly."
+fi
 
-sed -i '/show_smap_vma_flags(m, vma);/a #ifdef CONFIG_KSU_SUSFS_SUS_MAP\nbypass_orig_flow: ;\n#endif' fs/proc/task_mmu.c
+# ---------------------------------------------------------------------
+#  4. 修补 kernel/sys.c
+# ---------------------------------------------------------------------
+if [ -f "$SYS_C" ]; then
+    echo "⚙️ sed aligning: $SYS_C ..."
+    
+    # 注入外部变量声明
+    sed -i '/SYSCALL_DEFINE1(newuname/i \
+#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME\nextern struct static_key_false susfs_is_uname_spoof_buffer_set;\nextern void susfs_spoof_uname(struct new_utsname* tmp);\n#endif' "$SYS_C"
 
+    # 内存复制后立即篡改
+    sed -i '/memcpy(&tmp, utsname(), sizeof(tmp));/a \
+#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME\n\tif (static_branch_likely(\&susfs_is_uname_spoof_buffer_set))\n\t\tsusfs_spoof_uname(\&tmp);\n#endif' "$SYS_C"
+    
+    echo "✅ $SYS_C sed patched flawlessly."
+fi
 
-# =====================================================================
-# 4. 彻底重构 kernel/sys.c (精准靶向锁定，100% 规避误杀)
-# =====================================================================
-echo "🔧 [Fixing] kernel/sys.c..."
-
-# 4.1 在 newuname 上方精准注入外部声明 (仅此一处)
-sed -i '/SYSCALL_DEFINE1(newuname/i #ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME\nextern struct static_key_false susfs_is_uname_spoof_buffer_set;\nextern void susfs_spoof_uname(struct new_utsname* tmp);\n#endif' kernel/sys.c
-
-# 4.2 通过绝对唯一的函数入口锚点，向下顺延特定行数进行精准替换
-# 定位到 SYSCALL_DEFINE1(newuname)，然后向下匹配第一个 memcpy 并进行就地替换，绝不影响其他任何函数！
-sed -i '/SYSCALL_DEFINE1(newuname/,/memcpy/s/memcpy(&tmp, utsname(), sizeof(tmp));/memcpy(\&tmp, utsname(), sizeof(tmp));\n#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME\n\tif (static_branch_likely(\&susfs_is_uname_spoof_buffer_set))\n\t\tsusfs_spoof_uname(\&tmp);\n#endif/' kernel/sys.c
-
-
-# =====================================================================
-# 5. 收尾清理
-# =====================================================================
-find . -name "*.rej" -delete
-find . -name "*.orig" -delete
-
-echo "🎉 [Script Engine] Non-destructive deployment finished perfectly."
+echo "====================================================================="
+echo " 🎉 CI/CD DEPLOYMENT PREP COMPLETE: ALL RESCUE HUNKS INJECTED VIA sed!"
+echo "====================================================================="
