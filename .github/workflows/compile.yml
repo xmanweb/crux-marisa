@@ -89,29 +89,70 @@ jobs:
           # ---------------------------------------------------------------------
           if [ -f "fs/namespace.c" ]; then
             echo "🔧 [Fixing] fs/namespace.c..."
-            # 先还原补丁可能引起的半吊子状态，确保干净切入
             git checkout fs/namespace.c 2>/dev/null || true
             
-            # 1.1 修复 mnt_free_id 释放豁免逻辑
             sed -i '/int id = mnt->mnt_id;/a \\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (mnt->mnt.mnt_flags & VFSMOUNT_MNT_FLAGS_KSU_UNSHARED_MNT)\n\t\treturn;\n#endif' fs/namespace.c
             
-            # 1.2 重构 mnt_alloc_group_id 入口拦截
             sed -i '/static int mnt_alloc_group_id(struct mount \*mnt)/a #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (susfs_is_current_ksu_domain()) {\n\t\tint res;\n\t\tif (!ida_pre_get(&mnt_group_ida, GFP_KERNEL))\n\t\t\treturn -ENOMEM;\n\t\tres = ida_get_new_above(&mnt_group_ida, DEFAULT_KSU_MNT_GROUP_ID, \&mnt->mnt_group_id);\n\t\tif (!res)\n\t\t\treturn 0;\n\t}\n#endif' fs/namespace.c
 
-            # 1.3 强力修复 clone_mnt 中断头的 if(unlikely(is_mnt_ksu_unshared))
             if grep -q "mnt->mnt.mnt_flags &= ~(MNT_WRITE_HOLD|MNT_MARKED|MNT_INTERNAL);" fs/namespace.c; then
                 sed -i '/mnt->mnt.mnt_flags &= ~(MNT_WRITE_HOLD|MNT_MARKED|MNT_INTERNAL);/a #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (unlikely(is_mnt_ksu_unshared))\n\t\tmnt->mnt.mnt_flags |= VFSMOUNT_MNT_FLAGS_KSU_UNSHARED_MNT;\n#endif' fs/namespace.c
             fi
           fi
 
           # ---------------------------------------------------------------------
-          # 2. 精准修复 fs/proc/cmdline.c
+          # 2. 精准修复 fs/proc/cmdline.c (采用纯 echo -e / printf 机制，干掉全部前导缩进)
           # ---------------------------------------------------------------------
           if [ -f "fs/proc/cmdline.c" ]; then
             echo "🔧 [Fixing] fs/proc/cmdline.c..."
             git checkout fs/proc/cmdline.c 2>/dev/null || true
-            sed -i '/static int cmdline_proc_show/i #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\nextern struct static_key_false susfs_is_fake_cmdline_or_bootconfig_buffer_set;\nextern void susfs_spoof_cmdline_or_bootconfig(struct seq_file *m);\n#endif' fs/proc/cmdline.c
-            sed -i '/static int cmdline_proc_show(struct seq_file \*m, void \*v)/,!b; /{/a #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\n\tif (static_branch_likely(&susfs_is_fake_cmdline_or_bootconfig_buffer_set)) {\n\t\tsusfs_spoof_cmdline_or_bootconfig(m);\n\t\tseq_printf(m, \"%s\\\\n\");\n\t\treturn 0;\n\t}\n#endif' fs/proc/cmdline.c
+            
+            rm -f fs/proc/cmdline.c
+            echo '#include <linux/fs.h>' >> fs/proc/cmdline.c
+            echo '#include <linux/init.h>' >> fs/proc/cmdline.c
+            echo '#include <linux/proc_fs.h>' >> fs/proc/cmdline.c
+            echo '#include <linux/seq_file.h>' >> fs/proc/cmdline.c
+            echo '' >> fs/proc/cmdline.c
+            echo '#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG' >> fs/proc/cmdline.c
+            echo 'extern struct static_key_false susfs_is_fake_cmdline_or_bootconfig_buffer_set;' >> fs/proc/cmdline.c
+            echo 'extern void susfs_spoof_cmdline_or_bootconfig(struct seq_file *m);' >> fs/proc/cmdline.c
+            echo '#endif' >> fs/proc/cmdline.c
+            echo '' >> fs/proc/cmdline.c
+            echo 'static int cmdline_proc_show(struct seq_file *m, void *v)' >> fs/proc/cmdline.c
+            echo '{' >> fs/proc/cmdline.c
+            echo '#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG' >> fs/proc/cmdline.c
+            printf "\tif (static_branch_likely(&susfs_is_fake_cmdline_or_bootconfig_buffer_set)) {\n" >> fs/proc/cmdline.c
+            printf "\t\tsusfs_spoof_cmdline_or_bootconfig(m);\n" >> fs/proc/cmdline.c
+            printf "\t\tseq_printf(m, \"%%s\\\\n\");\n" >> fs/proc/cmdline.c
+            printf "\t\treturn 0;\n" >> fs/proc/cmdline.c
+            printf "\t}\n" >> fs/proc/cmdline.c
+            echo '#endif' >> fs/proc/cmdline.c
+            echo '#ifdef CONFIG_INITRAMFS_IGNORE_SKIP_FLAG' >> fs/proc/cmdline.c
+            printf "\tseq_printf(m, \"%%s\\\\n\", proc_command_line);\n" >> fs/proc/cmdline.c
+            echo '#else' >> fs/proc/cmdline.c
+            printf "\tseq_printf(m, \"%%s\\\\n\", saved_command_line);\n" >> fs/proc/cmdline.c
+            echo '#endif' >> fs/proc/cmdline.c
+            printf "\treturn 0;\n" >> fs/proc/cmdline.c
+            echo '}' >> fs/proc/cmdline.c
+            echo '' >> fs/proc/cmdline.c
+            echo 'static int cmdline_proc_open(struct inode *inode, struct file *file)' >> fs/proc/cmdline.c
+            echo '{' >> fs/proc/cmdline.c
+            printf "\treturn single_open(file, cmdline_proc_show, NULL);\n" >> fs/proc/cmdline.c
+            echo '}' >> fs/proc/cmdline.c
+            echo '' >> fs/proc/cmdline.c
+            echo 'static const struct file_operations cmdline_proc_fops = {' >> fs/proc/cmdline.c
+            printf "\t.open\t\t= cmdline_proc_open,\n" >> fs/proc/cmdline.c
+            printf "\t.read\t\t= seq_read,\n" >> fs/proc/cmdline.c
+            printf "\t.llseek\t\t= seq_lseek,\n" >> fs/proc/cmdline.c
+            printf "\t.release\t= single_release,\n" >> fs/proc/cmdline.c
+            echo '};' >> fs/proc/cmdline.c
+            echo '' >> fs/proc/cmdline.c
+            echo 'static int __init proc_cmdline_init(void)' >> fs/proc/cmdline.c
+            echo '{' >> fs/proc/cmdline.c
+            printf "\tproc_create(\"cmdline\", 0, NULL, &cmdline_proc_fops);\n" >> fs/proc/cmdline.c
+            printf "\treturn 0;\n" >> fs/proc/cmdline.c
+            echo '}' >> fs/proc/cmdline.c
+            echo 'fs_initcall(proc_cmdline_init);' >> fs/proc/cmdline.c
           fi
 
           # ---------------------------------------------------------------------
@@ -121,21 +162,16 @@ jobs:
             echo "🔧 [Fixing] fs/proc/task_mmu.c..."
             git checkout fs/proc/task_mmu.c 2>/dev/null || true
 
-            # 3.1 注入头文件
             sed -i '/#include <linux\/uaccess.h>/i #if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)\n#include <linux/susfs.h>\n#endif' fs/proc/task_mmu.c
 
-            # 3.2 补正 show_map_vma 里的条件返回体
             sed -i '/struct inode \*inode = file_inode(vma->vm_file);/a #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\t\tif (SUSFS_IS_INODE_SUS_MAP(inode))\n\t\t\treturn;\n#endif' fs/proc/task_mmu.c
 
-            # 3.3 重构魔改版内核的 show_smap 拦截 (解决空标签断流)
             if grep -q "static int show_smap(struct seq_file \*m, void \*v)" fs/proc/task_mmu.c; then
                 sed -i '/static int show_smap(struct seq_file \*m, void \*v)/,!b; /{/a #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tstruct vm_area_struct *vma = v;\n\tif (vma && vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n\t\treturn 0;\n#endif' fs/proc/task_mmu.c
             fi
 
-            # 3.4 纠正 pagemap_read 的无条件跳转错误 (释放信号量 + continue)
             sed -i '/down_read(&mm->mmap_sem);/a #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\t\tvma = find_vma(mm, start_vaddr);\n\t\tif (vma && vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))) {\n\t\t\tup_read(&mm->mmap_sem);\n\t\t\tstart_vaddr = end;\n\t\t\tcontinue;\n\t\t}\n#endif' fs/proc/task_mmu.c
 
-            # 3.5 补充过滤 show_numa_map，确保全面隐藏 maps
             if grep -q "static int show_numa_map(struct seq_file \*m, void \*v)" fs/proc/task_mmu.c; then
                 sed -i '/static int show_numa_map(struct seq_file \*m, void \*v)/,!b; /{/a #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tstruct vm_area_struct *vma = v;\n\tif (vma && vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n\t\treturn 0;\n#endif' fs/proc/task_mmu.c
             fi
@@ -148,15 +184,12 @@ jobs:
             echo "🔧 [Fixing] kernel/sys.c..."
             git checkout kernel/sys.c 2>/dev/null || true
             
-            # SYSCALL_DEFINE1(newuname)
             sed -i '/SYSCALL_DEFINE1(newuname/i #ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME\nextern struct static_key_false susfs_is_uname_spoof_buffer_set;\nextern void susfs_spoof_uname(struct new_utsname* tmp);\n#endif' kernel/sys.c
             sed -i '/memcpy(&tmp, utsname(), sizeof(tmp));/a #ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME\n\tif (static_branch_likely(&susfs_is_uname_spoof_buffer_set))\n\t\tsusfs_spoof_uname(\&tmp);\n#endif' kernel/sys.c
             
-            # SYSCALL_DEFINE1(uname)
             sed -i '/SYSCALL_DEFINE1(uname/i #ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME\nextern struct static_key_false susfs_is_uname_spoof_buffer_set;\nextern void susfs_spoof_uname(struct new_utsname* tmp);\n#endif' kernel/sys.c
           fi
 
-          # 强力清除所有生成的冲突残渣
           find . -name "*.rej" -delete
           find . -name "*.orig" -delete
 
