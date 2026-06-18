@@ -21,21 +21,20 @@ if [ -f "$NAMESPACE_C" ]; then
     sed -i '/#include "internal.h"/a \
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n#ifndef VFSMOUNT_MNT_FLAGS_KSU_UNSHARED_MNT\n#define VFSMOUNT_MNT_FLAGS_KSU_UNSHARED_MNT BIT(24)\n#endif\n#ifndef DEFAULT_KSU_MNT_GROUP_ID\n#define DEFAULT_KSU_MNT_GROUP_ID (100000)\n#endif\nextern bool susfs_is_current_ksu_domain(void);\nextern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;\n#define CL_COPY_MNT_NS BIT(25)\n#endif' "$NAMESPACE_C"
 
-    # B. mnt_free_id 顶部拦截
-    sed -i '/static void mnt_free_id(struct mount \*mnt)/,/{/ {
-        /{/a \
-#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (mnt->mnt.mnt_flags & VFSMOUNT_MNT_FLAGS_KSU_UNSHARED_MNT)\n\t\treturn;\n#endif
-    }' "$NAMESPACE_C"
+    # B. mnt_free_id 顶部拦截 (找到函数名后，跳到其大括号下方追加)
+    sed -i '/static void mnt_free_id(struct mount \*mnt)/{n;a \
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (mnt->mnt.mnt_flags \& VFSMOUNT_MNT_FLAGS_KSU_UNSHARED_MNT)\n\t\treturn;\n#endif
+}' "$NAMESPACE_C"
 
     # C. mnt_alloc_group_id 特权分配拦截
-    sed -i '/static int mnt_alloc_group_id(struct mount \*mnt)/,/{/ {
-        /{/a \
-#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (susfs_is_current_ksu_domain()) {\n\t\tint res_ksu;\n\t\tif (!ida_pre_get(\&mnt_group_ida, GFP_KERNEL))\n\t\t\treturn -ENOMEM;\n\t\tres_ksu = ida_get_new_above(\&mnt_group_ida, DEFAULT_KSU_MNT_GROUP_ID, \&mnt->mnt_group_id);\n\t\tif (!res_ksu)\n\t\t\treturn 0;\n\t}\n#endif' "$NAMESPACE_C"
+    sed -i '/static int mnt_alloc_group_id(struct mount \*mnt)/{n;a \
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (susfs_is_current_ksu_domain()) {\n\t\tint res_ksu;\n\t\tif (!ida_pre_get(\&mnt_group_ida, GFP_KERNEL))\n\t\t\treturn -ENOMEM;\n\t\tres_ksu = ida_get_new_above(\&mnt_group_ida, DEFAULT_KSU_MNT_GROUP_ID, \&mnt->mnt_group_id);\n\t\tif (!res_ksu)\n\t\t\treturn 0;\n\t}\n#endif
+}' "$NAMESPACE_C"
 
     # D. mnt_release_group_id 防火墙
-    sed -i '/void mnt_release_group_id(struct mount \*mnt)/,/{/ {
-        /{/a \
-#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (mnt->mnt_group_id == DEFAULT_KSU_MNT_GROUP_ID)\n\t\treturn;\n#endif' "$NAMESPACE_C"
+    sed -i '/void mnt_release_group_id(struct mount \*mnt)/{n;a \
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (mnt->mnt_group_id == DEFAULT_KSU_MNT_GROUP_ID)\n\t\treturn;\n#endif
+}' "$NAMESPACE_C"
 
     # E. clone_mnt 核心代码精细前后包裹与 UNSHARED 旗标注入
     sed -i '/mnt = alloc_vfsmnt(old->mnt_devname);/i \
@@ -61,9 +60,9 @@ if [ -f "$CMDLINE_C" ]; then
 #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\nextern struct static_key_false susfs_is_fake_cmdline_or_bootconfig_buffer_set;\nextern void susfs_spoof_cmdline_or_bootconfig(struct seq_file *m);\n#endif\n' "$CMDLINE_C"
 
     # 在函数入口的大括号后面注入劫持阻断
-    sed -i '/static int cmdline_proc_show/,/{/ {
-        /{/a \
-#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\n\tif (static_branch_likely(\&susfs_is_fake_cmdline_or_bootconfig_buffer_set)) {\n\t\tsusfs_spoof_cmdline_or_bootconfig(m);\n\t\tseq_printf(m, "%s\\n");\n\t\treturn 0;\n\t}\n#endif' "$CMDLINE_C"
+    sed -i '/static int cmdline_proc_show/{n;a \
+#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\n\tif (static_branch_likely(\&susfs_is_fake_cmdline_or_bootconfig_buffer_set)) {\n\t\tsusfs_spoof_cmdline_or_bootconfig(m);\n\t\tseq_printf(m, "%s\\n");\n\t\treturn 0;\n\t}\n#endif
+}' "$CMDLINE_C"
     
     echo "✅ $CMDLINE_C sed patched flawlessly."
 fi
@@ -79,9 +78,9 @@ if [ -f "$TASK_MMU_C" ]; then
 #if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)\n#include <linux/susfs.h>\n#endif' "$TASK_MMU_C"
 
     # B. 入口绝杀 smaps 扫描
-    sed -i '/static int show_smap(struct seq_file \*m, void \*v)/,/{/ {
-        /{/a \
-#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tstruct vm_area_struct *vma_ksu = v;\n\tif (vma_ksu \&\& vma_ksu->vm_file) {\n\t\tif (SUSFS_IS_INODE_SUS_MAP(file_inode(vma_ksu->vm_file)))\n\t\t\treturn 0;\n\t}\n#endif' "$TASK_MMU_C"
+    sed -i '/static int show_smap(struct seq_file \*m, void \*v)/{n;a \
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tstruct vm_area_struct *vma_ksu = v;\n\tif (vma_ksu \&\& vma_ksu->vm_file) {\n\t\tif (SUSFS_IS_INODE_SUS_MAP(file_inode(vma_ksu->vm_file)))\n\t\t\treturn 0;\n\t}\n#endif
+}' "$TASK_MMU_C"
     
     echo "✅ $TASK_MMU_C sed patched flawlessly."
 fi
