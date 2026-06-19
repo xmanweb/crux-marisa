@@ -1,6 +1,6 @@
 #!/bin/sh
 # =====================================================================
-#  🚀 [RESCUE HUNKS ENGINE] AUTOMATED sed PATCH ALIGNMENT SCRIPT
+#  🚀 [RESCUE HUNKS ENGINE] AUTOMATED sed PATCH ALIGNMENT SCRIPT v2
 # =====================================================================
 
 set -e
@@ -89,15 +89,22 @@ if [ -f "$CMDLINE_C" ] && ! grep -q "susfs_spoof_cmdline_or_bootconfig" "$CMDLIN
 fi
 
 # ---------------------------------------------------------------------
-#  3. 修补 fs/proc/task_mmu.c
+#  3. 修补 fs/proc/task_mmu.c (增加强力防漏锁，强制在首行塞入头文件)
 # ---------------------------------------------------------------------
-if [ -f "$TASK_MMU_C" ] && ! grep -q "SUSFS_IS_INODE_SUS_MAP" "$TASK_MMU_C"; then
+if [ -f "$TASK_MMU_C" ]; then
     echo "⚙️ sed aligning: $TASK_MMU_C ..."
-    sed -i '/#include <linux\/ctype.h>/a \
-#if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)\n#include <linux/susfs.h>\n#endif' "$TASK_MMU_C"
-    sed -i '/static int show_smap(struct seq_file \*m, void \*v)/{n;a \
+    
+    # 彻底清理掉之前可能由于判断失败产生的残留引用，防止重复包含
+    sed -i '/linux\/susfs.h/d' "$TASK_MMU_C"
+    
+    # 绝杀：直接通过 1i 强行写入文件最开头，确保任何后续函数甚至其他 patch 注入的钩子都能完美感知定义
+    sed -i '1i #if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)\n#include <linux/susfs.h>\n#endif' "$TASK_MMU_C"
+
+    if ! grep -q "struct vm_area_struct \*vma_ksu = v;" "$TASK_MMU_C"; then
+        sed -i '/static int show_smap(struct seq_file \*m, void \*v)/{n;a \
 #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tstruct vm_area_struct *vma_ksu = v;\n\tif (vma_ksu \&\& vma_ksu->vm_file) {\n\t\tif (SUSFS_IS_INODE_SUS_MAP(file_inode(vma_ksu->vm_file)))\n\t\t\treturn 0;\n\t}\n#endif
 }' "$TASK_MMU_C"
+    fi
     echo "✅ $TASK_MMU_C sed patched flawlessly."
 fi
 
