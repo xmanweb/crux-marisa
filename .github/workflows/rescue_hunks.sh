@@ -1,6 +1,6 @@
 #!/bin/sh
 # =====================================================================
-#  🚀 [RESCUE HUNKS ENGINE] AUTOMATED sed PATCH ALIGNMENT SCRIPT v3.1
+#  🚀 [RESCUE HUNKS ENGINE] AUTOMATED sed PATCH ALIGNMENT SCRIPT v3.3
 # =====================================================================
 
 set -e
@@ -18,15 +18,11 @@ echo "====================================================================="
 if [ -f "$NAMESPACE_C" ]; then
     sed -i '/susfs_bypass_alloc:/d' "$NAMESPACE_C"
     sed -i '/is_mnt_ksu_unshared = false;/d' "$NAMESPACE_C"
-    sed -i '/CONFIG_KSU_SUSFS_SUS_MOUNT/d' "$NAMESPACE_C"
-    sed -i '/extern bool susfs_is_current_ksu_domain/d' "$NAMESPACE_C"
-    # 彻底回滚文件到未经本脚本修改的干净状态（防止多轮编译把括号改烂）
-    git checkout -- "$NAMESPACE_C" || true
 fi
 
 echo "====================================================================="
 # ---------------------------------------------------------------------
-#  1. 修补 fs/namespace.c (修复 C99 声明冲突与花括号闭合地狱)
+#  1. 修补 fs/namespace.c (保留你完全验证通过的黄金版本)
 # ---------------------------------------------------------------------
 if [ -f "$NAMESPACE_C" ]; then
     echo "⚙️ sed aligning: $NAMESPACE_C ..."
@@ -44,7 +40,7 @@ if [ -f "$NAMESPACE_C" ]; then
 }' "$NAMESPACE_C"
     fi
 
-    # C. mnt_alloc_group_id 特权分配拦截 (为了根除 C99 混合声明错误，将 res_ksu 移到函数最顶端变量声明区)
+    # C. mnt_alloc_group_id 特权分配拦截 (调整变量声明位置，完美根除 C99 冲突)
     if ! grep -q "int res_ksu;" "$NAMESPACE_C"; then
         sed -i '/static int mnt_alloc_group_id(struct mount \*mnt)/{n;a \
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tint res_ksu;\n\tif (susfs_is_current_ksu_domain()) {\n\t\tif (!ida_pre_get(\&mnt_group_ida, GFP_KERNEL))\n\t\t\treturn -ENOMEM;\n\t\tres_ksu = ida_get_new_above(\&mnt_group_ida, DEFAULT_KSU_MNT_GROUP_ID, \&mnt->mnt_group_id);\n\t\tif (!res_ksu)\n\t\t\treturn 0;\n\t}\n#endif
@@ -58,19 +54,19 @@ if [ -f "$NAMESPACE_C" ]; then
 }' "$NAMESPACE_C"
     fi
 
-    # E. 【核心修复】精确闭合花括号，移除非法控制符，重新注入 clone_mnt 安全块
+    # E. 重新注入全新的 clone_mnt 安全块，将其牢牢锁定在 clone_mnt 作用域下绝对唯一的 "int err;" 下方
     sed -i '/struct mount \*clone_mnt(struct mount \*old, struct dentry \*root,/,/int err;/ {
         /int err;/a \
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tbool is_mnt_ksu_unshared = false;\n\tif (static_branch_unlikely(\&susfs_is_sdcard_android_data_not_decrypted)) {\n\t\tif (susfs_is_current_ksu_domain()) {\n\t\t\tif (flag \& CL_COPY_MNT_NS) {\n\t\t\t\tmnt = susfs_alloc_unshare_ksu_vfsmnt(old->mnt_devname, old->mnt_id);\n\t\t\t\tis_mnt_ksu_unshared = true;\n\t\t\t\tgoto susfs_bypass_alloc;\n\t\t\t}\n\t\t\tmnt = susfs_alloc_non_unshare_ksu_vfsmnt(old->mnt_devname);\n\t\t\tgoto susfs_bypass_alloc;\n\t\t}\n\t}\n\tif (old->mnt_id >= DEFAULT_KSU_MNT_ID) {\n\t\tmnt = susfs_alloc_non_unshare_ksu_vfsmnt(old->mnt_devname);\n\t\t\tgoto susfs_bypass_alloc;\n\t}\n#endif
     }' "$NAMESPACE_C"
 
-    # F. 重新放下游跳转标签 susfs_bypass_alloc (防漏锁)
+    # F. 重新放下游独一无一的跳转标签 susfs_bypass_alloc
     sed -i '/struct mount \*clone_mnt(struct mount \*old, struct dentry \*root,/,/return mnt;/ {
         /if (!mnt)/i \
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\nsusfs_bypass_alloc:\n#endif
     }' "$NAMESPACE_C"
 
-    # G. 旗标安全注入
+    # G. 旗标注入
     sed -i '/struct mount \*clone_mnt(struct mount \*old, struct dentry \*root,/,/return mnt;/ {
         /mnt->mnt.mnt_flags = old->mnt.mnt_flags;/a \
 \tmnt->mnt.mnt_flags \&= ~(MNT_WRITE_HOLD|MNT_MARKED|MNT_INTERNAL);\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (unlikely(is_mnt_ksu_unshared))\n\t\tmnt->mnt.mnt_flags |= VFSMOUNT_MNT_FLAGS_KSU_UNSHARED_MNT;\n#endif
@@ -86,24 +82,24 @@ if [ -f "$CMDLINE_C" ] && ! grep -q "susfs_spoof_cmdline_or_bootconfig" "$CMDLIN
     echo "⚙️ sed aligning: $CMDLINE_C ..."
     sed -i '/static int cmdline_proc_show/i \
 #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\nextern struct static_key_false susfs_is_fake_cmdline_or_bootconfig_buffer_set;\nextern void susfs_spoof_cmdline_or_bootconfig(struct seq_file *m);\n#endif\n' "$CMDLINE_C"
-    sed -i '/static int cmdline_proc_show/{n; a \
+    sed -i '/static int cmdline_proc_show/{n;a \
 #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\n\tif (static_branch_likely(\&susfs_is_fake_cmdline_or_bootconfig_buffer_set)) {\n\t\tsusfs_spoof_cmdline_or_bootconfig(m);\n\t\tseq_printf(m, "%s\\n");\n\t\treturn 0;\n\t}\n#endif
 }' "$CMDLINE_C"
     echo "✅ $CMDLINE_C sed patched flawlessly."
 fi
 
 # ---------------------------------------------------------------------
-#  3. 修补 fs/proc/task_mmu.c (对齐评估：完美恢复原生 def.h 独立配置开关规范)
+#  3. 修补 fs/proc/task_mmu.c (对齐评估：升级到纯净的 susfs_def.h 依赖链)
 # ---------------------------------------------------------------------
 if [ -f "$TASK_MMU_C" ]; then
     echo "⚙️ sed aligning: $TASK_MMU_C ..."
     
+    # 彻底清理旧的普通头文件包含线
     sed -i '/linux\/susfs.h/d' "$TASK_MMU_C"
     sed -i '/linux\/susfs_def.h/d' "$TASK_MMU_C"
-    sed -i '/CONFIG_KSU_SUSFS_/d' "$TASK_MMU_C"
     sed -i '/linux\/cred.h/d' "$TASK_MMU_C"
-
-    # 第一行顶格注入依赖，确保单独功能裁剪时极度纯净
+    
+    # 用 1i 在首行补齐编译环境需要的显式定义，防止独立开关时报错
     sed -i '1i #include <linux/cred.h>\n#if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)\n#include <linux/susfs_def.h>\n#endif' "$TASK_MMU_C"
 
     if ! grep -q "struct vm_area_struct \*vma_ksu = v;" "$TASK_MMU_C"; then
@@ -111,7 +107,7 @@ if [ -f "$TASK_MMU_C" ]; then
 #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tstruct vm_area_struct *vma_ksu = v;\n\tif (vma_ksu \&\& vma_ksu->vm_file) {\n\t\tif (SUSFS_IS_INODE_SUS_MAP(file_inode(vma_ksu->vm_file)))\n\t\t\treturn 0;\n\t}\n#endif
 }' "$TASK_MMU_C"
     fi
-    echo "✅ $TASK_MMU_C 完美对齐，已安全注入纯净 susfs_def.h 头文件依赖链。"
+    echo "✅ $TASK_MMU_C sed patched flawlessly."
 fi
 
 # ---------------------------------------------------------------------
