@@ -1,6 +1,6 @@
 #!/bin/sh
 # =====================================================================
-#  🚀 [RESCUE HUNKS ENGINE] AUTOMATED sed PATCH ALIGNMENT SCRIPT v4.5
+#  🚀 [RESCUE HUNKS ENGINE] AUTOMATED sed PATCH ALIGNMENT SCRIPT v4.6
 # =====================================================================
 
 set -e
@@ -62,7 +62,7 @@ if [ -f "$CMDLINE_C" ] && ! grep -q "susfs_spoof_cmdline_or_bootconfig" "$CMDLIN
 fi
 
 # ---------------------------------------------------------------------
-#  3. 修补 fs/proc/task_mmu.c (全量补回 4 处失败的 Patch)
+#  3. 修补 fs/proc/task_mmu.c (严格对齐内核 C89 规范，防重复注入)
 # ---------------------------------------------------------------------
 if [ -f "$TASK_MMU_C" ]; then
     echo "⚙️ sed aligning: $TASK_MMU_C ..."
@@ -78,22 +78,31 @@ if [ -f "$TASK_MMU_C" ]; then
 #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\t\tif (SUSFS_IS_INODE_SUS_MAP(inode))\n\t\t\treturn;\n#endif' "$TASK_MMU_C"
     fi
 
-    # 【第三处失败】show_smap 拦截丢失
+    # 【第三处失败】show_smap & show_smaps_rollup 拦截丢失
+    # 注入到函数大括号后的第一行，完美规避 mixing declarations and code 警告
     if ! grep -q "vma_ksu = v;" "$TASK_MMU_C"; then
-        sed -i '/struct mem_size_stats mss;/i \
-#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tstruct vm_area_struct *vma_ksu = v;\n\tif (vma_ksu \&\& vma_ksu->vm_file) {\n\t\tif (SUSFS_IS_INODE_SUS_MAP(file_inode(vma_ksu->vm_file)))\n\t\t\treturn 0;\n\t}\n#endif' "$TASK_MMU_C"
+        # 注入 show_smap 头部
+        sed -i '/static int show_smap(struct seq_file \*m, void \*v)/{n;a \
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tstruct vm_area_struct *vma_ksu = v;\n\tif (vma_ksu \&\& vma_ksu->vm_file) {\n\t\tif (SUSFS_IS_INODE_SUS_MAP(file_inode(vma_ksu->vm_file)))\n\t\t\treturn 0;\n\t}\n#endif
+}' "$TASK_MMU_C"
+
+        # 注入 show_smaps_rollup 头部
+        sed -i '/static int show_smaps_rollup(struct seq_file \*m, void \*v)/{n;a \
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tstruct vm_area_struct *vma_ksu = v;\n\tif (vma_ksu \&\& vma_ksu->vm_file) {\n\t\tif (SUSFS_IS_INODE_SUS_MAP(file_inode(vma_ksu->vm_file)))\n\t\t\treturn 0;\n\t}\n#endif
+}' "$TASK_MMU_C"
     fi
 
     # 【第四处失败】pagemap_read 拦截丢失
-    if ! grep -q "walk_page_range" "$TASK_MMU_C" | grep -q "bypass_orig_flow"; then
-        sed -i '/ret = walk_page_range(start_vaddr, end, \&pagemap_walk);/i \
-#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\t\tstruct vm_area_struct *vma = find_vma(mm, start_vaddr);\n\t\tif (vma \&\& vma->vm_file \&\& SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n\t\t\tgoto bypass_orig_flow;\n#endif' "$TASK_MMU_C"
+    # 严格检查 "struct vm_area_struct *vma = find_vma" 或已有宏注脚，防止 redefinition 重复定义报错
+    if ! grep -q "struct vm_area_struct \*vma = find_vma" "$TASK_MMU_C"; then
+        sed -i '/down_read(\&mm->mmap_sem);/a \
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\t\tvma = find_vma(mm, start_vaddr);\n\t\tif (vma \&\& vma->vm_file \&\& SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n\t\t\tgoto bypass_orig_flow;\n#endif' "$TASK_MMU_C"
 
         sed -i '/ret = walk_page_range(start_vaddr, end, \&pagemap_walk);/a \
 #ifdef CONFIG_KSU_SUSFS_SUS_MAP\nbypass_orig_flow:\n#endif' "$TASK_MMU_C"
     fi
 
-    echo "✅ $TASK_MMU_C sed patched flawlessly (All 4 Hunks Restored)."
+    echo "✅ $TASK_MMU_C sed patched flawlessly (Strictly Complied with C89 & No Redefinition)."
 fi
 
 # ---------------------------------------------------------------------
