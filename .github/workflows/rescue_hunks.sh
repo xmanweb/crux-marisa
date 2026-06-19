@@ -1,6 +1,6 @@
 #!/bin/sh
 # =====================================================================
-#  🚀 [RESCUE HUNKS ENGINE] AUTOMATED sed PATCH ALIGNMENT SCRIPT v2
+#  🚀 [RESCUE HUNKS ENGINE] AUTOMATED sed PATCH ALIGNMENT SCRIPT v3
 # =====================================================================
 
 set -e
@@ -57,7 +57,7 @@ if [ -f "$NAMESPACE_C" ]; then
     # E. 重新注入全新的 clone_mnt 安全块，将其牢牢锁定在 clone_mnt 作用域下绝对唯一的 "int err;" 下方
     sed -i '/struct mount \*clone_mnt(struct mount \*old, struct dentry \*root,/,/int err;/ {
         /int err;/a \
-#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tbool is_mnt_ksu_unshared = false;\n\tif (static_branch_unlikely(\&susfs_is_sdcard_android_data_not_decrypted)) {\n\t\tif (susfs_is_current_ksu_domain()) {\n\t\t\fif (flag \& CL_COPY_MNT_NS) {\n\t\t\t\tmnt = susfs_alloc_unshare_ksu_vfsmnt(old->mnt_devname, old->mnt_id);\n\t\t\t\tis_mnt_ksu_unshared = true;\n\t\t\t\tgoto susfs_bypass_alloc;\n\t\t\t}\n\t\t\tmnt = susfs_alloc_non_unshare_ksu_vfsmnt(old->mnt_devname);\n\t\t\tgoto susfs_bypass_alloc;\n\t\t}\n\t}\n\tif (old->mnt_id >= DEFAULT_KSU_MNT_ID) {\n\t\tmnt = susfs_alloc_non_unshare_ksu_vfsmnt(old->mnt_devname);\n\t\t\tgoto susfs_bypass_alloc;\n\t}\n#endif
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tbool is_mnt_ksu_unshared = false;\n\tif (static_branch_unlikely(\&susfs_is_sdcard_android_data_not_decrypted)) {\n\t\tif (susfs_is_current_ksu_domain()) {\n\t\t\fif (flag \& CL_COPY_MNT_NS) {\n\t\t\t\tmnt = susfs_alloc_unshare_ksu_vfsmnt(old->mnt_devname, old->mnt_id);\n\t\t\t\tis_mnt_ksu_unshared = true;\n\t\t\t\tgoto susfs_bypass_alloc;\n\t\t\t}\n\t\t\tmnt = susfs_alloc_non_unshare_ksu_vfsmnt(old->mnt_devname);\n\t\t\tgoto susfs_bypass_alloc;\n\t}\n\tif (old->mnt_id >= DEFAULT_KSU_MNT_ID) {\n\t\tmnt = susfs_alloc_non_unshare_ksu_vfsmnt(old->mnt_devname);\n\t\t\tgoto susfs_bypass_alloc;\n\t}\n#endif
     }' "$NAMESPACE_C"
 
     # F. 重新放下游独一无二的跳转标签 susfs_bypass_alloc
@@ -89,23 +89,28 @@ if [ -f "$CMDLINE_C" ] && ! grep -q "susfs_spoof_cmdline_or_bootconfig" "$CMDLIN
 fi
 
 # ---------------------------------------------------------------------
-#  3. 修补 fs/proc/task_mmu.c (增加强力防漏锁，强制在首行塞入头文件)
+#  3. 修补 fs/proc/task_mmu.c (【核心重构点】纯洁性对齐，前置补齐依赖)
 # ---------------------------------------------------------------------
 if [ -f "$TASK_MMU_C" ]; then
     echo "⚙️ sed aligning: $TASK_MMU_C ..."
     
-    # 彻底清理掉之前可能由于判断失败产生的残留引用，防止重复包含
+    # 防御性全面清洗旧残留（防止由于上一次失败脚本产生混合冲突）
     sed -i '/linux\/susfs.h/d' "$TASK_MMU_C"
-    
-    # 绝杀：直接通过 1i 强行写入文件最开头，确保任何后续函数甚至其他 patch 注入的钩子都能完美感知定义
-    sed -i '1i #if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)\n#include <linux/susfs.h>\n#endif' "$TASK_MMU_C"
+    sed -i '/linux\/susfs_def.h/d' "$TASK_MMU_C"
+    sed -i '/CONFIG_KSU_SUSFS_/d' "$TASK_MMU_C"
+    sed -i '/linux\/cred.h/d' "$TASK_MMU_C"
 
+    # 核心修正：严格按照补丁原意使用 <linux/susfs_def.h>，同时显式补全 <linux/cred.h> 前置依赖
+    # 使用 1i 强插至第一行，确保在编译单元最顶端扫清 current_uid() 未定义隐式错误
+    sed -i '1i #include <linux/cred.h>\n#if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)\n#include <linux/susfs_def.h>\n#endif' "$TASK_MMU_C"
+
+    # 拦截宏结构校准（保留使用你已经写好的 show_smap 开头精确定位拦截）
     if ! grep -q "struct vm_area_struct \*vma_ksu = v;" "$TASK_MMU_C"; then
         sed -i '/static int show_smap(struct seq_file \*m, void \*v)/{n;a \
 #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tstruct vm_area_struct *vma_ksu = v;\n\tif (vma_ksu \&\& vma_ksu->vm_file) {\n\t\tif (SUSFS_IS_INODE_SUS_MAP(file_inode(vma_ksu->vm_file)))\n\t\t\treturn 0;\n\t}\n#endif
 }' "$TASK_MMU_C"
     fi
-    echo "✅ $TASK_MMU_C sed patched flawlessly."
+    echo "✅ $TASK_MMU_C 完美对齐，已安全注入纯净 susfs_def.h 头文件依赖链。"
 fi
 
 # ---------------------------------------------------------------------
