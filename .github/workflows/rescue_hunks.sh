@@ -1,7 +1,7 @@
 #!/bin/bash
 # ==============================================================================
-# 🛠️ 终极无损修复版 rescue_hunk.sh (基于你的高效内联清障引擎)
-# 补全了 namespace.c、task_mmu.c 缺失的挂钩，并将 sys.c 完美融入 Python 引擎
+# 🛠️ 直装修复版 rescue_hunk.sh (精准修复 namespace.c 失败 Hunks)
+# 针对老版内核的 ida_get_new_above 分配与释放逻辑进行原汁原味的无损修补
 # ==============================================================================
 
 echo "=== [Actions Core] 开始执行高级内联清障引擎 ==="
@@ -10,51 +10,77 @@ python3 -c '
 import os
 import re
 
-def inline_patch(filepath, target_anchor, insert_code, mode="after"):
-    if not os.path.exists(filepath):
-        print(f"[-] 跳过不存在的文件: {filepath}")
-        return
-    with open(filepath, "r") as f:
-        content = f.read()
-    
-    if target_anchor in content:
-        if insert_code in content:
-            print(f"[!] {filepath} 已经处理过，跳过。")
-            return
-        if mode == "after":
-            content = content.replace(target_anchor, target_anchor + "\n" + insert_code)
-        elif mode == "before":
-            content = content.replace(target_anchor, insert_code + "\n" + target_anchor)
-        with open(filepath, "w") as f:
-            f.write(content)
-        print(f"[+] 成功内联修补: {filepath}")
-    else:
-        print(f"[-] 错误: 在 {filepath} 中找不到特征锚点: {target_anchor[:30]}...")
+# ------------------------------------------------------------------------------
+# 1. 修复 fs/namespace.c
+# ------------------------------------------------------------------------------
+if os.path.exists("fs/namespace.c"):
+    with open("fs/namespace.c", "r") as f:
+        ns_content = f.read()
 
-# ------------------------------------------------------------------------------
-# 1. 修复 fs/namespace.c (追加补全 m_show 挂载隐藏)
-# ------------------------------------------------------------------------------
-ns_anchor = "static int mnt_alloc_group_id(struct mount *mnt)\n{"
-ns_code = """#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
-	if (susfs_is_current_ksu_domain()) {
-		int res = ida_alloc_min(&mnt_group_ida, DEFAULT_KSU_MNT_GROUP_ID, GFP_KERNEL);
-		if (res < 0)
-			return res;
-		mnt->mnt_group_id = res;
-		return 0;
-	}
+    # A. 确保包含外部声明
+    if "susfs_is_secret_mount" not in ns_content:
+        ns_header_anchor = "#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\nextern bool susfs_is_current_ksu_domain(void);"
+        ns_header_code = "\nextern bool susfs_is_secret_mount(struct mount *mnt);"
+        ns_content = ns_content.replace(ns_header_anchor, ns_header_anchor + ns_header_code)
+
+    # B. 精准修补 mnt_free_id (对齐 .rej 逻辑)
+    ns_free_anchor = "static void mnt_free_id(struct mount *mnt)\n{\n\tint id = mnt->mnt_id;"
+    ns_free_code = """
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+	if (mnt->mnt.mnt_flags & VFSMOUNT_MNT_FLAGS_KSU_UNSHARED_MNT)
+		return;
 #endif"""
-inline_patch("fs/namespace.c", ns_anchor, ns_code, "after")
+    if "VFSMOUNT_MNT_FLAGS_KSU_UNSHARED_MNT" not in ns_content and ns_free_anchor in ns_content:
+        ns_content = ns_content.replace(ns_free_anchor, ns_free_anchor + ns_free_code)
+        print("[+] 成功修补 mnt_free_id 释放过滤逻辑")
 
-ns_mshow_anchor = "static int m_show(struct seq_file *m, void *v)\n{"
-ns_mshow_code = """#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+    # C. 精准修补 mnt_alloc_group_id (完全对齐 .rej 的 ida_get_new_above 老版机制)
+    ns_alloc_anchor = "static int mnt_alloc_group_id(struct mount *mnt)\n{\n\tint res;"
+    ns_alloc_code = """
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
 	if (susfs_is_current_ksu_domain()) {
-		struct mount *r = v;
-		if (r && susfs_is_secret_mount(r))
+		if (!ida_pre_get(&mnt_group_ida, GFP_KERNEL))
+			return -ENOMEM;
+		res = ida_get_new_above(&mnt_group_ida,
+					DEFAULT_KSU_MNT_GROUP_ID,
+					&mnt->mnt_group_id);
+		goto bypass_orig_flow;
+	}
+
+	if (!ida_pre_get(&mnt_group_ida, GFP_KERNEL))
+		return -ENOMEM;
+	res = ida_get_new_above(&mnt_group_ida,
+				mnt_group_start,
+				&mnt->mnt_group_id);
+bypass_orig_flow:
+#else
+	if (!ida_pre_get(&mnt_group_ida, GFP_KERNEL))
+		return -ENOMEM;
+
+	res = ida_get_new_above(&mnt_group_ida,
+				mnt_group_start,
+				&mnt->mnt_group_id);
+#endif"""
+
+    if "DEFAULT_KSU_MNT_GROUP_ID" not in ns_content and ns_alloc_anchor in ns_content:
+        ns_content = ns_content.replace(ns_alloc_anchor, ns_alloc_anchor + ns_alloc_code)
+        print("[+] 成功原汁原味修复老版 mnt_alloc_group_id 分配劫持")
+
+    # D. 修复 m_show 处的挂钩
+    ns_mshow_anchor = "static int m_show(struct seq_file *m, void *v)\n{"
+    ns_mshow_code = """#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+	if (susfs_is_current_ksu_domain()) {
+		struct mount *r_ksu = v;
+		if (r_ksu && susfs_is_secret_mount(r_ksu))
 			return 0;
 	}
 #endif"""
-inline_patch("fs/namespace.c", ns_mshow_anchor, ns_mshow_code, "after")
+    if "r_ksu = v" not in ns_content:
+        ns_content = ns_content.replace(ns_mshow_anchor, ns_mshow_anchor + "\n" + ns_mshow_code)
+        print("[+] 成功修复 m_show 挂载隐藏点")
+
+    with open("fs/namespace.c", "w") as f:
+        f.write(ns_content)
 
 
 # ------------------------------------------------------------------------------
@@ -91,7 +117,7 @@ extern void susfs_spoof_cmdline_or_bootconfig(struct seq_file *m);
 
 
 # ------------------------------------------------------------------------------
-# 3. 修复 fs/proc/task_mmu.c (补全 show_map 以及 rollup 循环)
+# 3. 修复 fs/proc/task_mmu.c
 # ------------------------------------------------------------------------------
 if os.path.exists("fs/proc/task_mmu.c"):
     with open("fs/proc/task_mmu.c", "r") as f:
@@ -108,16 +134,15 @@ if os.path.exists("fs/proc/task_mmu.c"):
         print("[+] 成功注入 task_mmu.c 核心头文件依赖")
 
     if "CONFIG_KSU_SUSFS_SUS_MAP" not in mmu_content:
-        # A. 修复 show_map
         map_pattern = r"(static int show_map\([^{]*\)\s*\{)"
         match_map = re.search(map_pattern, mmu_content)
         if match_map:
             matched_anchor = match_map.group(1)
             map_hook_code = """
 #ifdef CONFIG_KSU_SUSFS_SUS_MAP
-	struct vm_area_struct *vma = v;
-	if (vma && vma->vm_file && file_inode(vma->vm_file)) {
-		if (SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))) {
+	struct vm_area_struct *vma_ksu = v;
+	if (vma_ksu && vma_ksu->vm_file && file_inode(vma_ksu->vm_file)) {
+		if (SUSFS_IS_INODE_SUS_MAP(file_inode(vma_ksu->vm_file))) {
 			return 0;
 		}
 	}
@@ -125,16 +150,15 @@ if os.path.exists("fs/proc/task_mmu.c"):
             mmu_content = mmu_content.replace(matched_anchor, matched_anchor + map_hook_code)
             print("[+] 成功通过正则智能适配并修补 show_map")
 
-        # B. 修复 show_smap (保留你的逻辑)
         smap_pattern = r"(static int show_smap\([^{]*\)\s*\{)"
         match_smap = re.search(smap_pattern, mmu_content)
         if match_smap:
             matched_anchor = match_smap.group(1)
             smap_hook_code = """
 #ifdef CONFIG_KSU_SUSFS_SUS_MAP
-	struct vm_area_struct *vma = v;
-	if (vma && vma->vm_file && file_inode(vma->vm_file)) {
-		if (SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))) {
+	struct vm_area_struct *vma_ksu = v;
+	if (vma_ksu && vma_ksu->vm_file && file_inode(vma_ksu->vm_file)) {
+		if (SUSFS_IS_INODE_SUS_MAP(file_inode(vma_ksu->vm_file))) {
 			return 0;
 		}
 	}
@@ -142,7 +166,6 @@ if os.path.exists("fs/proc/task_mmu.c"):
             mmu_content = mmu_content.replace(matched_anchor, matched_anchor + smap_hook_code)
             print("[+] 成功通过正则智能适配并修补 show_smap")
 
-        # C. 修复 show_smaps_rollup 中的 vma 遍历循环
         rollup_anchor = "for (vma = priv->mm->mmap; vma; vma = vma->vm_next) {"
         if rollup_anchor in mmu_content:
             rollup_hook_code = """
@@ -158,7 +181,7 @@ if os.path.exists("fs/proc/task_mmu.c"):
 
 
 # ------------------------------------------------------------------------------
-# 4. 修复 kernel/sys.c (将原 shell sed 逻辑安全移入 Python 块)
+# 4. 修复 kernel/sys.c
 # ------------------------------------------------------------------------------
 if os.path.exists("kernel/sys.c"):
     with open("kernel/sys.c", "r") as f:
