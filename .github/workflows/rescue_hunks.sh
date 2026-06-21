@@ -1,161 +1,135 @@
 #!/bin/bash
+# =====================================================================
+#  SusFS 2.1.0 Patch Fixer for Crux Kernel 4.14.357
+# =====================================================================
 
-echo "==============================================================="
-echo "[+] [Rescue Hunk] 正在启动全自动内核补丁深度适配与质量审计脚本(4.14专用)..."
-echo "==============================================================="
+echo "🚀 [SusFS Rescue Engine] Starting manual repair for failed hunks..."
 
-# ==========================================
-# 1. 修复 fs/namespace.c (适配 4.14 内核 ida_simple_get)
-# ==========================================
-if [ -f "fs/namespace.c" ]; then
-    echo "[*] 正在审计 fs/namespace.c ..."
+cat << 'EOF' > fix_susfs_failed_hunks.py
+import os
+import re
+
+# ---------------------------------------------------------------------
+# 1. 修复 fs/namespace.c (解决 mnt_free_id 和 mnt_alloc_group_id 冲突)
+# ---------------------------------------------------------------------
+if os.path.exists('fs/namespace.c'):
+    print("[+] Patching fs/namespace.c...")
+    with open('fs/namespace.c', 'r') as f:
+        content = f.read()
     
-    # 基于 4.14 原生 ida_simple_get 机制重写，杜绝高版本函数的未定义报错
-    # 变量定义严格在最顶部，完美对齐 C99 规范
-    cat << 'EOF' > /tmp/new_mnt_alloc_group_id.c
-static int mnt_alloc_group_id(struct mount *mnt)
-{
-	int res;
+    # 修复 mnt_free_id
+    old_free = "static void mnt_free_id(struct mount *mnt)\n{\n\tint id = mnt->mnt_id;"
+    new_free = "static void mnt_free_id(struct mount *mnt)\n{\n\tint id = mnt->mnt_id;\n\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (mnt->mnt.mnt_flags & VFSMOUNT_MNT_FLAGS_KSU_UNSHARED_MNT)\n\t\treturn;\n#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT"
+    content = content.replace(old_free, new_free)
+
+    # 修复 mnt_alloc_group_id (使用正则兼容空格与Tab缩进变动)
+    alloc_pattern = r"(static int mnt_alloc_group_id\(struct mount \*mnt\)\s*\{\s*int res;)\s*(if \(!ida_pre_get\(&mnt_group_ida,\s*GFP_KERNEL\)\)\s*return -ENOMEM;\s*res = ida_get_new_above\(&mnt_group_ida,\s*mnt_group_start,\s*&mnt->mnt_group_id\);)"
+    alloc_replacement = """\\1
+
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
-	if (susfs_is_current_ksu_domain()) {
-		res = ida_simple_get(&mnt_group_ida, DEFAULT_KSU_MNT_GROUP_ID, 0, GFP_KERNEL);
-		if (res < 0)
-			return res;
-		mnt->mnt_group_id = res;
-		return 0;
-	}
-	res = ida_simple_get(&mnt_group_ida, 1, 0, GFP_KERNEL);
-	if (res < 0)
-		return res;
-	mnt->mnt_group_id = res;
+\tif (susfs_is_current_ksu_domain()) {
+\t\tif (!ida_pre_get(&mnt_group_ida, GFP_KERNEL))
+\t\t\treturn -ENOMEM;
+\t\tres = ida_get_new_above(&mnt_group_ida,
+\t\t\t\t\tDEFAULT_KSU_MNT_GROUP_ID,
+\t\t\t\t\t&mnt->mnt_group_id);
+\t\tgoto bypass_orig_flow;
+\t}
+
+\tif (!ida_pre_get(&mnt_group_ida, GFP_KERNEL))
+\t\treturn -ENOMEM;
+\tres = ida_get_new_above(&mnt_group_ida,
+\t\t\t\tmnt_group_start,
+\t\t\t\t&mnt->mnt_group_id);
+bypass_orig_flow:
 #else
-	res = ida_simple_get(&mnt_group_ida, 1, 0, GFP_KERNEL);
-	if (res < 0)
-		return res;
-	mnt->mnt_group_id = res;
-#endif
-	return 0;
-}
+\tif (!ida_pre_get(&mnt_group_ida, GFP_KERNEL))
+\t\treturn -ENOMEM;
+
+\tres = ida_get_new_above(&mnt_group_ida,
+\t\t\t\tmnt_group_start,
+\t\t\t\t&mnt->mnt_group_id);
+#endif"""
+    content = re.sub(alloc_pattern, alloc_replacement, content, flags=re.MULTILINE)
+
+    with open('fs/namespace.c', 'w') as f:
+        f.write(content)
+
+# ---------------------------------------------------------------------
+# 2. 修复 fs/proc/cmdline.c (解决 Spoof Cmdline 冲突)
+# ---------------------------------------------------------------------
+if os.path.exists('fs/proc/cmdline.c'):
+    print("[+] Patching fs/proc/cmdline.c...")
+    with open('fs/proc/cmdline.c', 'r') as f:
+        content = f.read()
+
+    if "susfs_spoof_cmdline_or_bootconfig" not in content:
+        content = content.replace(
+            "static int cmdline_proc_show",
+            "#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\nextern struct static_key_false susfs_is_fake_cmdline_or_bootconfig_buffer_set;\nextern void susfs_spoof_cmdline_or_bootconfig(struct seq_file *m);\n#endif\n\nstatic int cmdline_proc_show"
+        )
+        content = re.sub(
+            r'(seq_printf\(m,\s*"%s\\n",\s*saved_command_line\);)',
+            r'#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\n\tif (static_branch_likely(&susfs_is_fake_cmdline_or_bootconfig_buffer_set)) {\n\t\tsusfs_spoof_cmdline_or_bootconfig(m);\n\t\tseq_printf(m, "%s\\n");\n\t\treturn 0;\n\t}\n#endif\n\t\1',
+            content
+        )
+
+    with open('fs/proc/cmdline.c', 'w') as f:
+        f.write(content)
+
+# ---------------------------------------------------------------------
+# 3. 修复 fs/proc/task_mmu.c (解决 SMAP 遍历屏蔽冲突)
+# ---------------------------------------------------------------------
+if os.path.exists('fs/proc/task_mmu.c'):
+    print("[+] Patching fs/proc/task_mmu.c...")
+    with open('fs/proc/task_mmu.c', 'r') as f:
+        content = f.read()
+
+    if "susfs_def.h" not in content:
+        content = content.replace(
+            "#include <linux/ctype.h>",
+            "#include <linux/ctype.h>\n#if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)\n#include <linux/susfs_def.h>\n#endif"
+        )
+
+    # 注入 Size 打印屏蔽
+    size_pattern = r'(\s*if \(!rollup_mode\)\s+)(seq_printf\(m,\s*"Size:\s+%8lu kB\\n")'
+    size_replacement = r'\1#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tif (vma->vm_file) {\n\t\tif (SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n\t\t\treturn 0;\n\t}\n#endif\n\t\2'
+    content = re.sub(size_pattern, size_replacement, content)
+
+    # 注入 arch_show_smap 跳过逻辑
+    arch_pattern = r'(\s*if \(!rollup_mode\) \{\s*)(arch_show_smap\(m,\s*vma\);\s*show_smap_vma_flags\(m,\s*vma\);\s*\})'
+    arch_replacement = r'\1#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tif (vma->vm_file) {\n\t\tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n\t\t\tgoto bypass_orig_flow;\n\t}\n#endif\n\t\t\2\n\n#ifdef CONFIG_KSU_SUSFS_SUS_MAP\nbypass_orig_flow:\n#endif'
+    content = re.sub(arch_pattern, arch_replacement, content)
+
+    with open('fs/proc/task_mmu.c', 'w') as f:
+        f.write(content)
+
+# ---------------------------------------------------------------------
+# 4. 修复 kernel/sys.c (解决 Spoof Uname 冲突)
+# ---------------------------------------------------------------------
+if os.path.exists('kernel/sys.c'):
+    print("[+] Patching kernel/sys.c...")
+    with open('kernel/sys.c', 'r') as f:
+        content = f.read()
+
+    if "susfs_is_uname_spoof_buffer_set" not in content:
+        content = content.replace(
+            "SYSCALL_DEFINE1(newuname, struct new_utsname __user *, name)",
+            "#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME\nextern struct static_key_false susfs_is_uname_spoof_buffer_set;\nextern void susfs_spoof_uname(struct new_utsname* tmp);\n#endif\nSYSCALL_DEFINE1(newuname, struct new_utsname __user *, name)"
+        )
+        content = content.replace(
+            "\tmemcpy(&tmp, utsname(), sizeof(tmp));",
+            "\tmemcpy(&tmp, utsname(), sizeof(tmp));\n#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME\n\tif (static_branch_likely(&susfs_is_uname_spoof_buffer_set))\n\t\tsusfs_spoof_uname(&tmp);\n#endif"
+        )
+
+    with open('kernel/sys.c', 'w') as f:
+        f.write(content)
+
+print("🎉 [SusFS Rescue Engine] All failed hunks fixed successfully!")
 EOF
 
-    # 寻找原函数边界并用 4.14 安全适配版平替
-    sed -i '/static int mnt_alloc_group_id/,/^}/c\__REPLACE_MNT_ALLOC_GROUP_ID__' fs/namespace.c
-    sed -i -e '/__REPLACE_MNT_ALLOC_GROUP_ID__/{r /tmp/new_mnt_alloc_group_id.c' -e 'd}' fs/namespace.c
-    rm -f /tmp/new_mnt_alloc_group_id.c
-    echo "[+] [namespace.c] 4.14 专属 C99 规范与 ida_simple_get 适配成功！"
-else
-    echo "[-] [namespace.c] 未找到目标文件，跳过。"
-fi
+# 执行修复脚本
+python3 fix_susfs_failed_hunks.py
 
-
-# ==========================================
-# 2. 修复 fs/proc/task_mmu.c
-# ==========================================
-if [ -f "fs/proc/task_mmu.c" ]; then
-    echo "[*] 正在审计 fs/proc/task_mmu.c ..."
-    
-    # 规整整个 show_map_vma 函数：
-    # 1. 变量定义全部提升到顶部，解决 mixing declarations and code 报错
-    # 2. 修复原厂 Patch 中把 & 漏写导致内存泄露和重定向失效的二级指针漏洞 (&spoofed_redirected_name)
-    cat << 'EOF' > /tmp/new_show_map_vma.c
-static void
-show_map_vma(struct seq_file *m, struct vm_area_struct *vma, int is_pid)
-{
-	struct file *file = vma->vm_file;
-	struct vm_region *region = NULL;
-	unsigned long ino = 0;
-	unsigned long pgoff = 0;
-	unsigned long start, end;
-	dev_t dev = 0;
-	const char *name = NULL;
-#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
-	char *spoofed_redirected_name = NULL;
-#endif
-	vm_flags_t flags = vma->vm_flags;
-
-	if (file) {
-		struct inode *inode = file_inode(vma->vm_file);
-#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
-		if (SUSFS_IS_INODE_OPEN_REDIRECT(inode)) {
-			/* 修复：原生补丁使用了值传递导致外部永远是 NULL，此处修正为传入二级指针 */
-			if (!susfs_open_redirect_spoof_show_map_vma(inode, &ino, &dev, &spoofed_redirected_name)) {
-				pgoff = ((loff_t)vma->vm_pgoff) << PAGE_SHIFT;
-				goto orig_flow;
-			}
-		}
-#endif
-#ifdef CONFIG_KSU_SUSFS_SUS_MAP
-		if (SUSFS_IS_INODE_SUS_MAP(inode))
-			return;
-#endif
-		dev = inode->i_sb->s_dev;
-		ino = inode->i_ino;
-		pgoff = ((loff_t)vma->vm_pgoff) << PAGE_SHIFT;
-#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
-		susfs_sus_kstat_spoof_show_map_vma(inode, &dev, &ino);
-#endif
-	}
-
-#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
-orig_flow:
-#endif
-	start = vma->vm_start;
-	end = vma->vm_end;
-	show_vma_header_prefix(m, start, end, flags, pgoff, dev, ino);
-
-#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
-	if (spoofed_redirected_name) {
-		seq_pad(m, ' ');
-		seq_puts(m, spoofed_redirected_name);
-		seq_putc(m, '\n');
-		kfree(spoofed_redirected_name);
-		return;
-	}
-#endif
-
-	if (file) {
-		seq_pad(m, ' ');
-		seq_file_path(m, file, "\n");
-		goto done;
-	}
-EOF
-
-    # 替换原函数头到特定打桩特征行
-    sed -i '/static void/,/seq_file_path(m, file, "\\n");/c\__REPLACE_SHOW_MAP_VMA__' fs/proc/task_mmu.c
-    sed -i -e '/__REPLACE_SHOW_MAP_VMA__/{r /tmp/new_show_map_vma.c' -e 'd}' fs/proc/task_mmu.c
-    rm -f /tmp/new_show_map_vma.c
-    echo "[+] [task_mmu.c] C99 变量清洗与重定向二级指针注入修复成功！"
-else
-    echo "[-] [task_mmu.c] 未找到目标文件，跳过。"
-fi
-
-
-# ==========================================
-# 3. 修复 kernel/sys.c
-# ==========================================
-if [ -f "kernel/sys.c" ]; then
-    echo "[*] 正在审计 kernel/sys.c ..."
-    sed -i 's/mixing_declarations_fix//g' kernel/sys.c
-    echo "[+] [sys.c] 只读审计完成，未发现语法冲突干扰。"
-else
-    echo "[-] [sys.c] 未找到目标文件，跳过。"
-fi
-
-
-# ==========================================
-# 4. 修复 fs/proc/cmdline.c
-# ==========================================
-if [ -f "fs/proc/cmdline.c" ]; then
-    echo "[*] 正在审计 fs/proc/cmdline.c ..."
-    if grep -q "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG" fs/proc/cmdline.c; then
-        sed -i '/#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG/,/susfs_spoof_cmdline_or_bootconfig/c\
-#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\n\tif (static_branch_unlikely(\&susfs_is_fake_cmdline_or_bootconfig_buffer_set)) {\n\t\tsusfs_spoof_cmdline_or_bootconfig(m);\n\t\treturn 0;\n\t}' fs/proc/cmdline.c
-        echo "[+] [cmdline.c] 伪造命令行返回路径逻辑校准成功！"
-    fi
-else
-    echo "[-] [cmdline.c] 未找到目标文件，跳过。"
-fi
-
-echo "==============================================================="
-echo "[+] [Rescue Hunk] 4.14 核心适配重构完毕，可以重新编译！"
-echo "==============================================================="
+# 清理临时脚本
+rm fix_susfs_failed_hunks.py
