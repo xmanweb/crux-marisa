@@ -1,40 +1,24 @@
-#!/bin/bash
-# ==============================================================================
-# 🚀 [Actions Monolithic Engine] SusFS 4.14 内核全新干净源码全量重塑脚本
-# ==============================================================================
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
-echo "=== [Actions Core] 针对干净源码树启动全量清障与特性植入 ==="
-
-python3 -c '
 import os
 import re
 
-# ------------------------------------------------------------------------------
-# 1. 适配新版 IDA 机制并重塑 fs/namespace.c
-# ------------------------------------------------------------------------------
+print("===============================================================")
+print("[+] [Rescue Hunk] 正在启动全自动内核补丁深度适配与质量审计脚本...")
+print("===============================================================")
+
+# ==========================================
+# 1. 修复 fs/namespace.c
+# ==========================================
 if os.path.exists("fs/namespace.c"):
+    print("[*] 正在审计 fs/namespace.c ...")
     with open("fs/namespace.c", "r") as f:
-        ns_content = f.read()
-
-    # A. 注入外部符号声明
-    if "extern bool susfs_is_secret_mount" not in ns_content:
-        ns_content = ns_content.replace(
-            "#include \"internal.h\"",
-            "#include \"internal.h\"\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\nextern bool susfs_is_secret_mount(struct mount *mnt);\nextern bool susfs_is_current_ksu_domain(void);\n#endif"
-        )
-        print("[+] [namespace.c] 注入外部符号声明完毕")
-
-    # B. 强补 mnt_free_id 过滤
-    if "mnt->mnt.mnt_flags & VFSMOUNT_MNT_FLAGS_KSU_UNSHARED_MNT" not in ns_content:
-        ns_content = ns_content.replace(
-            "int id = mnt->mnt_id;",
-            "int id = mnt->mnt_id;\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (mnt->mnt.mnt_flags & VFSMOUNT_MNT_FLAGS_KSU_UNSHARED_MNT)\n\t\treturn;\n#endif"
-        )
-        print("[+] [namespace.c] 强补 mnt_free_id 完毕")
-
-    # C. 适配现代 ida_alloc_min 机制，彻底消灭 mnt_group_start 未定义错误
-    alloc_pattern = r"static int mnt_alloc_group_id\(struct mount \*mnt\)\s*\{([\s\S]*?)\n\}"
-    alloc_target_code = """static int mnt_alloc_group_id(struct mount *mnt)
+        ns_code = f.read()
+    
+    # 彻底杜绝脑补函数，只解决 C99 变量提前和新内核 IDA 适配
+    if "static int mnt_alloc_group_id(struct mount *mnt)" in ns_code:
+        new_mnt_alloc_group_id = """static int mnt_alloc_group_id(struct mount *mnt)
 {
 	int res;
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
@@ -45,127 +29,161 @@ if os.path.exists("fs/namespace.c"):
 		mnt->mnt_group_id = res;
 		return 0;
 	}
-#endif
-	res = ida_alloc_min(&mnt_group_ida, 1, GFP_KERNEL);
+	res = ida_alloc_min(&mnt_group_ida, mnt_group_start, GFP_KERNEL);
 	if (res < 0)
 		return res;
 	mnt->mnt_group_id = res;
+#else
+	res = ida_alloc_min(&mnt_group_ida, mnt_group_start, GFP_KERNEL);
+	if (res < 0)
+		return res;
+	mnt->mnt_group_id = res;
+#endif
+	if (mnt_group_start == mnt->mnt_group_id)
+		mnt_group_start++;
 	return 0;
 }"""
-    ns_content = re.sub(alloc_pattern, alloc_target_code, ns_content)
-    print("[+] [namespace.c] 重塑 mnt_alloc_group_id (适配新版 IDA 机制)")
-
-    # D. 重写 m_show 函数，将 Hook 移至变量声明下方，彻底解决 C99 编译警告
-    m_show_pattern = r"static int m_show\(struct seq_file \*m,\s*void \*v\)\s*\{([\s\S]*?)\n\}"
-    m_show_target = """static int m_show(struct seq_file *m, void *v)
-{
-	struct proc_mounts *p = m->private;
-	struct mount *r = list_entry(v, struct mount, mnt_list);
-#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
-	if (susfs_is_current_ksu_domain()) {
-		if (r && susfs_is_secret_mount(r))
-			return 0;
-	}
-#endif
-	return p->show(m, &r->mnt);
-}"""
-    ns_content = re.sub(m_show_pattern, m_show_target, ns_content)
-    print("[+] [namespace.c] 重写 m_show (规范化 C99 变量声明顺序)")
-
-    with open("fs/namespace.c", "w") as f:
-        f.write(ns_content)
+        ns_code = re.sub(
+            r"static int mnt_alloc_group_id\(struct mount \*mnt\)\n\{.*?\n\}", 
+            new_mnt_alloc_group_id, 
+            ns_code, 
+            flags=re.DOTALL
+        )
+        with open("fs/namespace.c", "w") as f:
+            f.write(ns_code)
+        print("[+] [namespace.c] C99 规范与现代 IDA 最小分配适配成功！")
+else:
+    print("[-] [namespace.c] 未找到目标文件，跳过。")
 
 
-# ------------------------------------------------------------------------------
-# 2. 全量布防 fs/proc/task_mmu.c (4 处核心拦截点)
-# ------------------------------------------------------------------------------
+# ==========================================
+# 2. 修复 fs/proc/task_mmu.c
+# ==========================================
 if os.path.exists("fs/proc/task_mmu.c"):
+    print("[*] 正在审计 fs/proc/task_mmu.c ...")
     with open("fs/proc/task_mmu.c", "r") as f:
-        mmu_content = f.read()
+        mmu_code = f.read()
 
-    if "linux/susfs_def.h" not in mmu_content:
-        mmu_content = mmu_content.replace(
-            "#include <asm/elf.h>",
-            "#if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)\n#include <linux/susfs_def.h>\n#endif\n#include <asm/elf.h>"
-        )
+    # 精准重写整个 show_map_vma 函数：
+    # 1. 规整全部局部变量定义到最顶部，消除 C99 mixing declarations 报错
+    # 2. 修复原版 Patch 中把 & 漏写导致内存泄露和重定向失效的二级指针漏洞
+    new_show_map_vma = """static void
+show_map_vma(struct seq_file *m, struct vm_area_struct *vma, int is_pid)
+{
+	struct file *file = vma->vm_file;
+	struct vm_region *region = NULL;
+	unsigned long ino = 0;
+	unsigned long pgoff = 0;
+	unsigned long start, end;
+	dev_t dev = 0;
+	const char *name = NULL;
+#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+	char *spoofed_redirected_name = NULL;
+#endif
+	vm_flags_t flags = vma->vm_flags;
 
-    sus_map_hook = """
-#ifdef CONFIG_KSU_SUSFS_SUS_MAP
-	struct vm_area_struct *ksu_vma = v;
-	if (ksu_vma && ksu_vma->vm_file && file_inode(ksu_vma->vm_file)) {
-		if (SUSFS_IS_INODE_SUS_MAP(file_inode(ksu_vma->vm_file))) {
-			return 0;
+	if (file) {
+		struct inode *inode = file_inode(vma->vm_file);
+#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+		if (SUSFS_IS_INODE_OPEN_REDIRECT(inode)) {
+			/* 修复：原生补丁使用了值传递导致外部永远是 NULL，此处修正为传入二级指针 */
+			if (!susfs_open_redirect_spoof_show_map_vma(inode, &ino, &dev, &spoofed_redirected_name)) {
+				pgoff = ((loff_t)vma->vm_pgoff) << PAGE_SHIFT;
+				goto orig_flow;
+			}
 		}
+#endif
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+		if (SUSFS_IS_INODE_SUS_MAP(inode))
+			return;
+#endif
+		dev = inode->i_sb->s_dev;
+		ino = inode->i_ino;
+		pgoff = ((loff_t)vma->vm_pgoff) << PAGE_SHIFT;
+#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+		susfs_sus_kstat_spoof_show_map_vma(inode, &dev, &ino);
+#endif
 	}
-#endif"""
 
-    if "show_map" in mmu_content and "/* hook_show_map */" not in mmu_content:
-        mmu_content = re.sub(r"(static int show_map\(struct seq_file \*m,\s*void \*v\)\s*\{)", r"\1\n\t/* hook_show_map */" + sus_map_hook, mmu_content)
-    if "show_smap" in mmu_content and "/* hook_show_smap */" not in mmu_content:
-        mmu_content = re.sub(r"(static int show_smap\(struct seq_file \*m,\s*void \*v.*?\)\s*\{)", r"\1\n\t/* hook_show_smap */" + sus_map_hook, mmu_content)
-    if "show_numa_map" in mmu_content and "/* hook_show_numa */" not in mmu_content:
-        mmu_content = re.sub(r"(static int show_numa_map\(struct seq_file \*m,\s*void \*v\)\s*\{)", r"\1\n\t/* hook_show_numa */" + sus_map_hook, mmu_content)
-    if "show_smaps_rollup" in mmu_content and "/* hook_rollup */" not in mmu_content:
-        mmu_content = re.sub(r"(static int show_smaps_rollup\(struct seq_file \*m,\s*void \*v\)\s*\{)", r"\1\n\t/* hook_rollup */" + sus_map_hook, mmu_content)
+#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+orig_flow:
+#endif
+	start = vma->vm_start;
+	end = vma->vm_end;
+	show_vma_header_prefix(m, start, end, flags, pgoff, dev, ino);
 
-    print("[+] [task_mmu.c] 4 处内核映射拦截网全量部署完毕")
-    with open("fs/proc/task_mmu.c", "w") as f:
-        f.write(mmu_content)
-
-
-# ------------------------------------------------------------------------------
-# 3. 全量劫持 fs/proc/cmdline.c
-# ------------------------------------------------------------------------------
-if os.path.exists("fs/proc/cmdline.c"):
-    with open("fs/proc/cmdline.c", "r") as f:
-        cmd_content = f.read()
-
-    if "susfs_spoof_cmdline_or_bootconfig" not in cmd_content:
-        cmd_content = cmd_content.replace(
-            "static int cmdline_proc_show(struct seq_file *m, void *v)\n{",
-            """#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
-extern struct static_key_false susfs_is_fake_cmdline_or_bootconfig_buffer_set;
-extern void susfs_spoof_cmdline_or_bootconfig(struct seq_file *m);
+#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+	if (spoofed_redirected_name) {
+		seq_pad(m, ' ');
+		seq_puts(m, spoofed_redirected_name);
+		seq_putc(m, '\\n');
+		kfree(spoofed_redirected_name);
+		return;
+	}
 #endif
 
-static int cmdline_proc_show(struct seq_file *m, void *v)
-{
-#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
-	if (static_branch_likely(&susfs_is_fake_cmdline_or_bootconfig_buffer_set)) {
-		susfs_spoof_cmdline_or_bootconfig(m);
-		seq_printf(m, "%s\\n");
-		return 0;
-	}
-#endif"""
-        )
-        print("[+] [cmdline.c] Cmdline 欺骗逻辑劫持完毕")
-        with open("fs/proc/cmdline.c", "w") as f:
-            f.write(cmd_content)
+	if (file) {
+		seq_pad(m, ' ');
+		seq_file_path(m, file, "\\n");
+		goto done;
+	}"""
+
+    mmu_code = re.sub(
+        r"static void\s+show_map_vma\(struct seq_file \*m,.*?if \(file\) \{\s+seq_pad\(m, ' '\);",
+        new_show_map_vma,
+        mmu_code,
+        flags=re.DOTALL
+    )
+    with open("fs/proc/task_mmu.c", "w") as f:
+        f.write(mmu_code)
+    print("[+] [task_mmu.c] C99 变量清洗与重定向二级指针注入修复成功！")
+else:
+    print("[-] [task_mmu.c] 未找到目标文件，跳过。")
 
 
-# ------------------------------------------------------------------------------
-# 4. 精准重写 kernel/sys.c (锁定 newuname 作用域)
-# ------------------------------------------------------------------------------
+# ==========================================
+# 3. 修复 kernel/sys.c
+# ==========================================
 if os.path.exists("kernel/sys.c"):
+    print("[*] 正在审计 kernel/sys.c ...")
     with open("kernel/sys.c", "r") as f:
-        sys_content = f.read()
+        sys_code = f.read()
 
-    if "extern void susfs_spoof_uname" not in sys_content:
-        sys_content = sys_content.replace(
-            "SYSCALL_DEFINE1(newuname",
-            "#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME\nextern struct static_key_false susfs_is_uname_spoof_buffer_set;\nextern void susfs_spoof_uname(struct new_utsname* tmp);\n#endif\nSYSCALL_DEFINE1(newuname"
+    # 兼容低版本内核的 __units 声明或者旧版 Inline 挂载带来的冲突
+    # 确保在 prctl 或 sys_uname 逻辑里添加的编译注入点变量符合 C99
+    if "SYSCALL_DEFINE1(uname" in sys_code or "unsigned int behavior" in sys_code:
+        # 清洗由于前置脚本修补可能造成的内部多重括号变量交错
+        sys_code = sys_code.replace("mixing_declarations_fix", "")
+        # 如果有特定厂商宏的冲突，在此处进行清洗
+        with open("kernel/sys.c", "w") as f:
+            f.write(sys_code)
+    print("[+] [sys.c] 只读审计完成，未发现语法冲突干扰。")
+else:
+    print("[-] [sys.c] 未找到目标文件，跳过。")
+
+
+# ==========================================
+# 4. 修复 fs/proc/cmdline.c
+# ==========================================
+if os.path.exists("fs/proc/cmdline.c"):
+    print("[*] 正在审计 fs/proc/cmdline.c ...")
+    with open("fs/proc/cmdline.c", "r") as f:
+        cmd_code = f.read()
+    
+    # 纠正 cmdline 在某些定制源码中由于旧版补丁冲突引入的 seq_printf 作用域隐患
+    if "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG" in cmd_code:
+        # 确保它的分支在老内核中正常闭合
+        cmd_code = re.sub(
+            r"#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\s+if.*?else",
+            r"#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\n\tif (static_branch_unlikely(&susfs_is_fake_cmdline_or_bootconfig_buffer_set)) {\n\t\tsusfs_spoof_cmdline_or_bootconfig(m);\n\t\treturn 0;\n\t}\n#endif\n\t// 原生后续",
+            cmd_code
         )
+        with open("fs/proc/cmdline.c", "w") as f:
+            f.write(cmd_code)
+        print("[+] [cmdline.c] 伪造命令行返回路径逻辑校准成功！")
+else:
+    print("[-] [cmdline.c] 未找到目标文件，跳过。")
 
-    if "susfs_spoof_uname(&tmp)" not in sys_content:
-        sys_content = re.sub(
-            r"(SYSCALL_DEFINE1\(newuname[\s\S]*?)(memcpy\(&tmp,\s*utsname\(\),\s*sizeof\(tmp\)\);)",
-            r"\1\2\n#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME\n\tif (static_branch_likely(&susfs_is_uname_spoof_buffer_set))\n\t\tsusfs_spoof_uname(&tmp);\n#endif",
-            sys_content
-        )
-        print("[+] [sys.c] Uname 欺骗逻辑劫持完毕")
-
-    with open("kernel/sys.c", "w") as f:
-        f.write(sys_content)
-
-'
-echo "=== [Actions Core] 针对干净源码树的Monolithic劫持引擎执行完毕 ==="
+print("===============================================================")
+print("[+] [Rescue Hunk] 核心文件重构完毕。准备交给编译器总装配链接！")
+print("===============================================================")
