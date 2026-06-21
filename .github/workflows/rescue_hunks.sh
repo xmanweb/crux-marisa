@@ -1,7 +1,7 @@
 #!/bin/bash
 # ==============================================================================
-# 🛠️ 终极版 rescue_hunk.sh (智能正则匹配 + 依赖强力注入)
-# 彻底解决 task_mmu.c 锚点不匹配导致的头文件缺失与隐式声明报错
+# 🛠️ 终极版 rescue_hunk.sh (全面依赖注入 + 智能正则匹配)
+# 彻底解决 task_mmu.c 与 cmdline.c 缺失头文件导致的编译链崩溃
 # ==============================================================================
 
 echo "=== [Actions Core] 开始执行高级内联清障引擎 ==="
@@ -32,7 +32,7 @@ def inline_patch(filepath, target_anchor, insert_code, mode="after"):
         print(f"[-] 错误: 在 {filepath} 中找不到特征锚点: {target_anchor[:30]}...")
 
 # ------------------------------------------------------------------------------
-# 1. 修复 fs/namespace.c (现代 IDA 语法适配)
+# 1. 修复 fs/namespace.c
 # ------------------------------------------------------------------------------
 ns_anchor = "static int mnt_alloc_group_id(struct mount *mnt)\n{"
 ns_code = """#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
@@ -47,26 +47,46 @@ ns_code = """#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
 inline_patch("fs/namespace.c", ns_anchor, ns_code, "after")
 
 # ------------------------------------------------------------------------------
-# 2. 修复 fs/proc/cmdline.c (前置拦截)
+# 2. 修复 fs/proc/cmdline.c (头文件强力注入 + 挂钩劫持)
 # ------------------------------------------------------------------------------
-cmd_anchor = "static int cmdline_proc_show(struct seq_file *m, void *v)\n{"
-cmd_code = """#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+if os.path.exists("fs/proc/cmdline.c"):
+    with open("fs/proc/cmdline.c", "r") as f:
+        cmd_content = f.read()
+
+    # A. 强力前置注入 SUSFS 核心头文件依赖
+    cmd_header = "#include <linux/seq_file.h>"
+    cmd_header_code = """
+#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+#include <linux/susfs_def.h>
+#endif
+"""
+    if "linux/susfs_def.h" not in cmd_content and cmd_header in cmd_content:
+        cmd_content = cmd_content.replace(cmd_header, cmd_header + cmd_header_code)
+        print("[+] 成功注入 cmdline.c 核心头文件依赖")
+
+    # B. 注入逻辑挂钩
+    cmd_anchor = "static int cmdline_proc_show(struct seq_file *m, void *v)\n{"
+    cmd_code = """#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
 	if (static_branch_likely(&susfs_is_fake_cmdline_or_bootconfig_buffer_set)) {
 		susfs_spoof_cmdline_or_bootconfig(m);
 		seq_printf(m, "%s\\n");
 		return 0;
 	}
 #endif"""
-inline_patch("fs/proc/cmdline.c", cmd_anchor, cmd_code, "after")
+    if "susfs_is_fake_cmdline_or_bootconfig_buffer_set" not in cmd_content and cmd_anchor in cmd_content:
+        cmd_content = cmd_content.replace(cmd_anchor, cmd_anchor + "\n" + cmd_code)
+        print("[+] 成功内联修补挂钩逻辑: fs/proc/cmdline.c")
+
+    with open("fs/proc/cmdline.c", "w") as f:
+        f.write(cmd_content)
 
 # ------------------------------------------------------------------------------
-# 3. 强力修复 fs/proc/task_mmu.c (头文件注入 + 正则智能匹配)
+# 3. 修复 fs/proc/task_mmu.c (智能正则安全注入)
 # ------------------------------------------------------------------------------
 if os.path.exists("fs/proc/task_mmu.c"):
     with open("fs/proc/task_mmu.c", "r") as f:
         mmu_content = f.read()
 
-    # A. 无论如何，先确保头文件和必要宏声明进去
     mmu_header = "#include <linux/ctype.h>"
     mmu_header_code = """
 #if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)
@@ -77,9 +97,7 @@ if os.path.exists("fs/proc/task_mmu.c"):
         mmu_content = mmu_content.replace(mmu_header, mmu_header + mmu_header_code)
         print("[+] 成功注入 task_mmu.c 核心头文件依赖")
 
-    # B. 使用正则表达式动态匹配 show_smap 签名，完美兼容不同内核参数数量
     if "CONFIG_KSU_SUSFS_SUS_MAP" not in mmu_content:
-        # 匹配 static int show_smap(参数...) { 这种结构
         smap_pattern = r"(static int show_smap\([^{]*\)\s*\{)"
         match = re.search(smap_pattern, mmu_content)
         if match:
@@ -95,15 +113,13 @@ if os.path.exists("fs/proc/task_mmu.c"):
 #endif"""
             mmu_content = mmu_content.replace(matched_anchor, matched_anchor + smap_hook_code)
             print("[+] 成功通过正则智能适配并修补 show_smap")
-        else:
-            print("[-] 警告: 即使使用正则也未能找到 show_smap 函数入口")
             
     with open("fs/proc/task_mmu.c", "w") as f:
         f.write(mmu_content)
 '
 
 # ------------------------------------------------------------------------------
-# 4. 修复 kernel/sys.c (保持原位单行快照劫持)
+# 4. 修复 kernel/sys.c
 # ------------------------------------------------------------------------------
 if [ -f "kernel/sys.c" ]; then
     echo "[+] 正在二次修补: kernel/sys.c"
