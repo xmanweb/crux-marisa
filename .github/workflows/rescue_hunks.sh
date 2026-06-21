@@ -1,9 +1,9 @@
 #!/bin/bash
 # =====================================================================
-#  SusFS 2.1.0 Patch Fixer for Crux Kernel 4.14.357
+# 🚀 SusFS 2.1.0 Patch Fixer for Crux Kernel 4.14.357
 # =====================================================================
 
-echo "🚀 [SusFS Rescue Engine] Starting manual repair for failed hunks..."
+echo "🚀 [SusFS Rescue Engine] Starting manual repair and logic fix for failed hunks..."
 
 cat << 'EOF' > fix_susfs_failed_hunks.py
 import os
@@ -56,7 +56,7 @@ bypass_orig_flow:
         f.write(content)
 
 # ---------------------------------------------------------------------
-# 2. 修复 fs/proc/cmdline.c (解决 Spoof Cmdline 冲突)
+# 2. 修复 fs/proc/cmdline.c (解决 Spoof Cmdline 冲突及格式化致命Bug)
 # ---------------------------------------------------------------------
 if os.path.exists('fs/proc/cmdline.c'):
     print("[+] Patching fs/proc/cmdline.c...")
@@ -68,9 +68,10 @@ if os.path.exists('fs/proc/cmdline.c'):
             "static int cmdline_proc_show",
             "#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\nextern struct static_key_false susfs_is_fake_cmdline_or_bootconfig_buffer_set;\nextern void susfs_spoof_cmdline_or_bootconfig(struct seq_file *m);\n#endif\n\nstatic int cmdline_proc_show"
         )
+        # 【修改点】移除了原代码中的 `seq_printf(m, "%s\\n");`，防止缺失参数导致 C 编译失败
         content = re.sub(
             r'(seq_printf\(m,\s*"%s\\n",\s*saved_command_line\);)',
-            r'#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\n\tif (static_branch_likely(&susfs_is_fake_cmdline_or_bootconfig_buffer_set)) {\n\t\tsusfs_spoof_cmdline_or_bootconfig(m);\n\t\tseq_printf(m, "%s\\n");\n\t\treturn 0;\n\t}\n#endif\n\t\1',
+            r'#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\n\tif (static_branch_likely(&susfs_is_fake_cmdline_or_bootconfig_buffer_set)) {\n\t\tsusfs_spoof_cmdline_or_bootconfig(m);\n\t\treturn 0;\n\t}\n#endif\n\t\1',
             content
         )
 
@@ -78,7 +79,7 @@ if os.path.exists('fs/proc/cmdline.c'):
         f.write(content)
 
 # ---------------------------------------------------------------------
-# 3. 修复 fs/proc/task_mmu.c (解决 SMAP 遍历屏蔽冲突)
+# 3. 修复 fs/proc/task_mmu.c (解决 SMAP 遍历屏蔽冲突及空指针 Bug)
 # ---------------------------------------------------------------------
 if os.path.exists('fs/proc/task_mmu.c'):
     print("[+] Patching fs/proc/task_mmu.c...")
@@ -101,11 +102,18 @@ if os.path.exists('fs/proc/task_mmu.c'):
     arch_replacement = r'\1#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tif (vma->vm_file) {\n\t\tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n\t\t\tgoto bypass_orig_flow;\n\t}\n#endif\n\t\t\2\n\n#ifdef CONFIG_KSU_SUSFS_SUS_MAP\nbypass_orig_flow:\n#endif'
     content = re.sub(arch_pattern, arch_replacement, content)
 
+    # 【补充修改点】修复 susfs_open_redirect_spoof_show_map_vma 指针崩溃与内存泄漏
+    pattern_sig = r"(extern int susfs_open_redirect_spoof_show_map_vma\s*\(\s*struct inode\s*\*inode\s*,\s*unsigned long\s*\*out_ino\s*,\s*dev_t\s*\*out_dev\s*,\s*)char\s*\*spoofed_name(\s*\)\s*;)"
+    content = re.sub(pattern_sig, r"\1char **spoofed_name\2", content)
+
+    pattern_call = r"(susfs_open_redirect_spoof_show_map_vma\s*\(\s*inode\s*,\s*&ino\s*,\s*&dev\s*,\s*)spoofed_redirected_name(\s*\))"
+    content = re.sub(pattern_call, r"\1&spoofed_redirected_name\2", content)
+
     with open('fs/proc/task_mmu.c', 'w') as f:
         f.write(content)
 
 # ---------------------------------------------------------------------
-# 4. 修复 kernel/sys.c (解决 Spoof Uname 冲突)
+# 4. 修复 kernel/sys.c (解决 Spoof Uname 冲突及内核栈越界改写)
 # ---------------------------------------------------------------------
 if os.path.exists('kernel/sys.c'):
     print("[+] Patching kernel/sys.c...")
@@ -117,10 +125,23 @@ if os.path.exists('kernel/sys.c'):
             "SYSCALL_DEFINE1(newuname, struct new_utsname __user *, name)",
             "#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME\nextern struct static_key_false susfs_is_uname_spoof_buffer_set;\nextern void susfs_spoof_uname(struct new_utsname* tmp);\n#endif\nSYSCALL_DEFINE1(newuname, struct new_utsname __user *, name)"
         )
+        
+        # 你的原版注入（此处会同时影响 newuname 和老的 uname 系统调用）
         content = content.replace(
             "\tmemcpy(&tmp, utsname(), sizeof(tmp));",
             "\tmemcpy(&tmp, utsname(), sizeof(tmp));\n#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME\n\tif (static_branch_likely(&susfs_is_uname_spoof_buffer_set))\n\t\tsusfs_spoof_uname(&tmp);\n#endif"
         )
+        
+        # 【修改点】由于上一条替换会同时命长老的 uname，而老 uname 使用的是 `old_utsname`
+        # 强转给 `new_utsname` 结构会导致内核栈溢出。所以用正则对老 uname 单独加套安全壳！
+        pattern_old_uname = r"(SYSCALL_DEFINE1\s*\(\s*uname\s*,[\s\S]*?static_branch_likely\(&susfs_is_uname_spoof_buffer_set\)\s*\n\s*)susfs_spoof_uname\(&tmp\);"
+        replacement_old_uname = r"""\1{
+		struct new_utsname tmp_new;
+		memcpy(&tmp_new, utsname(), sizeof(struct new_utsname));
+		susfs_spoof_uname(&tmp_new);
+		memcpy(&tmp, &tmp_new, sizeof(struct old_utsname));
+	}"""
+        content = re.sub(pattern_old_uname, replacement_old_uname, content)
 
     with open('kernel/sys.c', 'w') as f:
         f.write(content)
