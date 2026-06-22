@@ -100,7 +100,7 @@ if [ -f "$CMDLINE_FILE" ]; then
             print "#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG"
             print "\tif (static_branch_likely(&susfs_is_fake_cmdline_or_bootconfig_buffer_set)) {"
             print "\t\tsusfs_spoof_cmdline_or_bootconfig(m);"
-            print "\t\tseq_printf(m, \"%s\\n\");"
+            print "\t\tseq_putc(m, \"\\n\");"
             print "\t\treturn 0;"
             print "\t}"
             print "#endif"
