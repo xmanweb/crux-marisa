@@ -1,13 +1,13 @@
 #!/bin/bash
 # =====================================================================
-# 🚀 SusFS 2.1.0 Total Patch Fixer (Full-Function Rewrite Edition V2)
+# 🚀 SusFS 2.1.0 Total Patch Fixer (ASCII Escape-Safe Edition)
 # 场景：GitHub Actions 自动化流水线 (全量、零污染、纯 BASH + AWK)
-# 特性：task_mmu.c 的 show_smap 与 show_smaps_rollup 两个核心函数全量重写
+# 特性：全面采用 ASCII 码及双引号替换脆弱的单引号转义，彻底解决编译阻断
 # =====================================================================
 
 set -e
 
-echo "🚀 [SusFS Rescue Engine] Starting total dual-function rewrite patch integration..."
+echo "🚀 [SusFS Rescue Engine] Starting ASCII safe dual-function rewrite..."
 
 # ---------------------------------------------------------------------
 # 1. 修复 fs/namespace.c (解决 3 处 Hunk FAILED，适配新版 IDA API)
@@ -96,7 +96,7 @@ if [ -f "$CMDLINE_FILE" ]; then
         if (in_cmdline_show == 1) {
             print "#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG"
             print "\tif (!susfs_spoof_cmdline_or_bootconfig(m)) {"
-            print "\t\tseq_putc(m, '\''\\n'\'');"
+            print "\t\tseq_putc(m, 10);" # 10 是 \n 的 ASCII 码，安全规避单引号
             print "\t\treturn 0;"
             print "\t}"
             print "#endif"
@@ -113,11 +113,11 @@ if [ -f "$CMDLINE_FILE" ]; then
 fi
 
 # ---------------------------------------------------------------------
-# 3. 修复 fs/proc/task_mmu.c (对 show_smap 与 show_smaps_rollup 全量外科重写)
+# 3. 修复 fs/proc/task_mmu.c (对 show_smap 与 show_smaps_rollup 全量重写，安全转义)
 # ---------------------------------------------------------------------
 TASK_MMU_FILE="fs/proc/task_mmu.c"
 if [ -f "$TASK_MMU_FILE" ]; then
-    echo "[+] Patching $TASK_MMU_FILE (Injecting full re-written show_smap and show_smaps_rollup)..."
+    echo "[+] Patching $TASK_MMU_FILE (Injecting clear ASCII rewritten show_smap and rollup)..."
     
     awk '
     BEGIN { 
@@ -152,14 +152,14 @@ if [ -f "$TASK_MMU_FILE" ]; then
             print "\t\tif (SUSFS_IS_INODE_SUS_MAP(inode)) {"
             print "\t\t\tshow_map_vma(m, vma);"
             print "\t\t\tSEQ_PUT_DEC(\"Size:           \", vma->vm_end - vma->vm_start);"
-            print "\t\t\tSEQ_PUT_DEC(\" kB\\\\nKernelPageSize: \", vma_kernel_pagesize(vma));"
-            print "\t\t\tSEQ_PUT_DEC(\" kB\\\\nMMUPageSize:    \", vma_mmu_pagesize(vma));"
-            print "\t\t\tseq_puts(m, \" kB\\\\n\");"
+            print "\t\t\tSEQ_PUT_DEC(\" kB\\nKernelPageSize: \", vma_kernel_pagesize(vma));"
+            print "\t\t\tSEQ_PUT_DEC(\" kB\\nMMUPageSize:    \", vma_mmu_pagesize(vma));"
+            print "\t\t\tseq_puts(m, \" kB\\n\");"
             print "\t\t\t__show_smap(m, &mss, false);"
             print "\t\t\tif (arch_pkeys_enabled())"
-            print "\t\t\t\t\tseq_printf(m, \"ProtectionKey:  %8u\\\\n\", vma_pkey(vma));"
+            print "\t\t\t\t\tseq_printf(m, \"ProtectionKey:  %8u\\n\", vma_pkey(vma));"
             print "\t\t\tseq_puts(m, \"VmFlags: mr mw me\");"
-            print "\t\t\tseq_putc(m, '\''\\\\n'\'');"
+            print "\t\t\tseq_putc(m, 10);" # 彻底解决多字节常量警告
             print "\t\t\tgoto bypass_orig_flow;"
             print "\t\t}"
             print "\t}"
@@ -171,18 +171,18 @@ if [ -f "$TASK_MMU_FILE" ]; then
             print "\tif (vma_get_anon_name(vma)) {"
             print "\t\tseq_puts(m, \"Name:           \");"
             print "\t\tseq_print_vma_name(m, vma);"
-            print "\t\tseq_putc(m, '\''\\\\n'\'');"
+            print "\t\tseq_putc(m, 10);" # 彻底解决多字节常量警告
             print "\t}"
             print ""
             print "\tSEQ_PUT_DEC(\"Size:           \", vma->vm_end - vma->vm_start);"
-            print "\tSEQ_PUT_DEC(\" kB\\\\nKernelPageSize: \", vma_kernel_pagesize(vma));"
-            print "\tSEQ_PUT_DEC(\" kB\\\\nMMUPageSize:    \", vma_mmu_pagesize(vma));"
-            print "\tseq_puts(m, \" kB\\\\n\");"
+            print "\tSEQ_PUT_DEC(\" kB\\nKernelPageSize: \", vma_kernel_pagesize(vma));"
+            print "\tSEQ_PUT_DEC(\" kB\\nMMUPageSize:    \", vma_mmu_pagesize(vma));"
+            print "\tseq_puts(m, \" kB\\n\");"
             print ""
             print "\t__show_smap(m, &mss, false);"
             print ""
             print "\tif (arch_pkeys_enabled())"
-            print "\t\tseq_printf(m, \"ProtectionKey:  %8u\\\\n\", vma_pkey(vma));"
+            print "\t\tseq_printf(m, \"ProtectionKey:  %8u\\n\", vma_pkey(vma));"
             print "\tshow_smap_vma_flags(m, vma);"
             print ""
             print "#ifdef CONFIG_KSU_SUSFS_SUS_MAP"
@@ -243,13 +243,12 @@ if [ -f "$TASK_MMU_FILE" ]; then
             print ""
             print "\tshow_vma_header_prefix(m, priv->mm->mmap->vm_start,"
             print "\t\t\t       last_vma_end, 0, 0, 0, 0);"
-            print "\tseq_pad(m, '\'' '\''[0]);"
-            print "\tseq_puts(m, \"[rollup]\\\\n\");"
+            print "\tseq_pad(m, 32);" # 使用 ASCII 码 32 代替空格单引号，彻底解决编译错误
+            print "\tseq_puts(m, \"[rollup]\\n\");"
             print ""
             print "\t__show_smap(m, &mss, true);"
             print ""
             print "\trelease_task_mempolicy(priv);"
-            print "\t// Fix potential mismatched kernel lock if present, keeping up_read original"
             print "\tup_read(&mm->mmap_sem);"
             print "\tmmput(mm);"
             print ""
@@ -316,4 +315,4 @@ if [ -f "$SYS_FILE" ]; then
     ' "$SYS_FILE" > "${SYS_FILE}.tmp" && mv "${SYS_FILE}.tmp" "$SYS_FILE"
 fi
 
-echo "🎉 [SusFS Rescue Engine] Double function-rewrite completed successfully! Clear for build."
+echo "🎉 [SusFS Rescue Engine] ASCII-Safe patch completed. Safe to compile now!"
