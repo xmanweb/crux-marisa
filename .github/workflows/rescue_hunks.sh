@@ -69,36 +69,48 @@ if [ -f "$NAMESPACE_FILE" ]; then
 fi
 
 # ---------------------------------------------------------------------
-# 2. 修复 fs/proc/cmdline.c (解决 Spoof Cmdline 冲突及格式化致命Bug)
+# 2. 修复 fs/proc/cmdline.c (状态机精确卡位：只在 cmdline_proc_show 内注入)
 # ---------------------------------------------------------------------
 CMDLINE_FILE="fs/proc/cmdline.c"
 if [ -f "$CMDLINE_FILE" ]; then
-    echo "[+] Patching $CMDLINE_FILE..."
-    if ! grep -q "susfs_spoof_cmdline_or_bootconfig" "$CMDLINE_FILE"; then
-        cp "$CMDLINE_FILE" "${CMDLINE_FILE}.bak"
-        awk '
-        /static int cmdline_proc_show/ && !header_added {
+    echo "[+] Patching $CMDLINE_FILE (Applying isolated cmdline spoof hook)..."
+    
+    awk '
+    BEGIN { 
+        header_added = 0; 
+        in_cmdline_show = 0;
+    }
+
+    /static int cmdline_proc_show/ {
+        if (!header_added) {
             print "#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG"
-            print "extern struct static_key_false susfs_is_fake_cmdline_or_bootconfig_buffer_set;"
-            print "extern void susfs_spoof_cmdline_or_bootconfig(struct seq_file *m);"
-            print "#endif\n"
+            print "extern int susfs_spoof_cmdline_or_bootconfig(struct seq_file *m);"
+            print "#endif"
+            print ""
             header_added = 1
         }
-        /seq_printf\(m,\s*"%s\\n",\s*saved_command_line\);/ {
+        in_cmdline_show = 1
+    }
+
+    /#ifdef CONFIG_INITRAMFS_IGNORE_SKIP_FLAG/ {
+        if (in_cmdline_show == 1) {
             print "#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG"
-            print "\tif (static_branch_likely(&susfs_is_fake_cmdline_or_bootconfig_buffer_set)) {"
-            print "\t\tsusfs_spoof_cmdline_or_bootconfig(m);"
+            print "\tif (!susfs_spoof_cmdline_or_bootconfig(m)) {"
+            print "\t\tseq_putc(m, 10);" # 10 是 \n 的 ASCII 码，安全规避单引号
             print "\t\treturn 0;"
             print "\t}"
             print "#endif"
-            print $0
-            next
+            in_cmdline_show = 0
         }
-        { print }
-        ' "$CMDLINE_FILE" > "${CMDLINE_FILE}.tmp" && mv "${CMDLINE_FILE}.tmp" "$CMDLINE_FILE"
-    fi
-fi
+    }
 
+    /^}/ {
+        in_cmdline_show = 0
+    }
+
+    { print }
+    ' "$CMDLINE_FILE" > "${CMDLINE_FILE}.tmp" && mv "${CMDLINE_FILE}.tmp" "$CMDLINE_FILE"
+fi
 # ---------------------------------------------------------------------
 # 3. 修复 fs/proc/task_mmu.c (对 show_smap 与 show_smaps_rollup 全量重写，安全转义)
 # ---------------------------------------------------------------------
