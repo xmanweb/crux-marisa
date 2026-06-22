@@ -1,13 +1,13 @@
 #!/bin/bash
 # =====================================================================
-# 🚀 SusFS 2.1.0 Total Patch Fixer (Function-Rewrite Ultimate Edition)
+# 🚀 SusFS 2.1.0 Total Patch Fixer (Full-Function Rewrite Edition V2)
 # 场景：GitHub Actions 自动化流水线 (全量、零污染、纯 BASH + AWK)
-# 特性：namespace.c/cmdline.c/sys.c 状态机隔离，task_mmu.c 核心函数全量重写
+# 特性：task_mmu.c 的 show_smap 与 show_smaps_rollup 两个核心函数全量重写
 # =====================================================================
 
 set -e
 
-echo "🚀 [SusFS Rescue Engine] Starting total precision patch integration..."
+echo "🚀 [SusFS Rescue Engine] Starting total dual-function rewrite patch integration..."
 
 # ---------------------------------------------------------------------
 # 1. 修复 fs/namespace.c (解决 3 处 Hunk FAILED，适配新版 IDA API)
@@ -113,19 +113,20 @@ if [ -f "$CMDLINE_FILE" ]; then
 fi
 
 # ---------------------------------------------------------------------
-# 3. 修复 fs/proc/task_mmu.c (对 show_smap 函数体进行全量外科重写)
+# 3. 修复 fs/proc/task_mmu.c (对 show_smap 与 show_smaps_rollup 全量外科重写)
 # ---------------------------------------------------------------------
 TASK_MMU_FILE="fs/proc/task_mmu.c"
 if [ -f "$TASK_MMU_FILE" ]; then
-    echo "[+] Patching $TASK_MMU_FILE (Injecting full re-written show_smap)..."
+    echo "[+] Patching $TASK_MMU_FILE (Injecting full re-written show_smap and show_smaps_rollup)..."
     
     awk '
     BEGIN { 
         header_added = 0; 
         rewrite_smap = 0; 
+        rewrite_rollup = 0;
     }
 
-    # 1. 在合适的位置添加头文件声明
+    # 头文件注入
     /#include <linux\/ctype\.h>/ && !header_added {
         print $0
         print "#if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)"
@@ -135,7 +136,7 @@ if [ -f "$TASK_MMU_FILE" ]; then
         next
     }
 
-    # 2. 匹配到旧的 static int show_smap 函数头部，开启拦截并注入你提供的新全量代码
+    # 拦截并重写第一个目标函数：show_smap
     /static int show_smap\(struct seq_file \*m, void \*v\)/, /^}/ {
         if (!rewrite_smap) {
             print "static int show_smap(struct seq_file *m, void *v)"
@@ -193,10 +194,77 @@ if [ -f "$TASK_MMU_FILE" ]; then
             print "}"
             rewrite_smap = 1
         }
-        next # 抛弃原本旧函数体内的所有旧行
+        next
     }
 
-    # 3. 对同文件内可能存在的 open_redirect 修复补丁保留适配
+    # 拦截并重写第二个目标函数：show_smaps_rollup
+    /static int show_smaps_rollup\(struct seq_file \*m, void \*v\)/, /^}/ {
+        if (!rewrite_rollup) {
+            print "static int show_smaps_rollup(struct seq_file *m, void *v)"
+            print "{"
+            print "\tstruct proc_maps_private *priv = m->private;"
+            print "\tstruct mem_size_stats mss;"
+            print "\tstruct mm_struct *mm;"
+            print "\tstruct vm_area_struct *vma;"
+            print "\tunsigned long last_vma_end = 0;"
+            print "\tint ret = 0;"
+            print ""
+            print "\tpriv->task = get_proc_task(priv->inode);"
+            print "\tif (!priv->task)"
+            print "\t\treturn -ESRCH;"
+            print ""
+            print "\tmm = priv->mm;"
+            print "\tif (!mm || !mmget_not_zero(mm)) {"
+            print "\t\tret = -ESRCH;"
+            print "\t\tgoto out_put_task;"
+            print "\t}"
+            print ""
+            print "\tmemset(&mss, 0, sizeof(mss));"
+            print ""
+            print "\tdown_read(&mm->mmap_sem);"
+            print "\thold_task_mempolicy(priv);"
+            print ""
+            print "\tfor (vma = priv->mm->mmap; vma; vma = vma->vm_next) {"
+            print "#ifdef CONFIG_KSU_SUSFS_SUS_MAP"
+            print "\t\tif (vma->vm_file) {"
+            print "\t\t\tstruct inode *inode = file_inode(vma->vm_file);"
+            print "\t\t\tif (SUSFS_IS_INODE_SUS_MAP(inode)) {"
+            print "\t\t\t\tmemset(&mss, 0, sizeof(mss));"
+            print "\t\t\t\tgoto bypass_orig_flow;"
+            print "\t\t\t}"
+            print "\t\t}"
+            print "#endif"
+            print "\t\tsmap_gather_stats(vma, &mss);"
+            print "#ifdef CONFIG_KSU_SUSFS_SUS_MAP"
+            print "bypass_orig_flow:"
+            print "#endif"
+            print "\t\tlast_vma_end = vma->vm_end;"
+            print "\t}"
+            print ""
+            print "\tshow_vma_header_prefix(m, priv->mm->mmap->vm_start,"
+            print "\t\t\t       last_vma_end, 0, 0, 0, 0);"
+            print "\tseq_pad(m, '\'' '\''[0]);"
+            print "\tseq_puts(m, \"[rollup]\\\\n\");"
+            print ""
+            print "\t__show_smap(m, &mss, true);"
+            print ""
+            print "\trelease_task_mempolicy(priv);"
+            print "\t// Fix potential mismatched kernel lock if present, keeping up_read original"
+            print "\tup_read(&mm->mmap_sem);"
+            print "\tmmput(mm);"
+            print ""
+            print "out_put_task:"
+            print "\tput_task_struct(priv->task);"
+            print "\tpriv->task = NULL;"
+            print ""
+            print "\treturn ret;"
+            print "}"
+            rewrite_rollup = 1
+        }
+        next
+    }
+
+    # 保持对 open_redirect 补丁的潜在相容性
     /extern int susfs_open_redirect_spoof_show_map_vma/ {
         sub(/char \*spoofed_name/, "char **spoofed_name")
     }
@@ -248,4 +316,4 @@ if [ -f "$SYS_FILE" ]; then
     ' "$SYS_FILE" > "${SYS_FILE}.tmp" && mv "${SYS_FILE}.tmp" "$SYS_FILE"
 fi
 
-echo "🎉 [SusFS Rescue Engine] Master rewrite executed successfully! Pipeline is ready to build."
+echo "🎉 [SusFS Rescue Engine] Double function-rewrite completed successfully! Clear for build."
