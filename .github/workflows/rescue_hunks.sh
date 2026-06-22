@@ -263,44 +263,51 @@ if [ -f "$TASK_MMU_FILE" ]; then
 fi
 
 # ---------------------------------------------------------------------
-# 4. 修复 kernel/sys.c (状态机护航：只在 newuname 内进行 SusFS 2.0.0 注入)
+# 4. 修复 kernel/sys.c (解决 Spoof Uname 冲突及内核栈越界改写)
 # ---------------------------------------------------------------------
 SYS_FILE="kernel/sys.c"
 if [ -f "$SYS_FILE" ]; then
-    echo "[+] Patching $SYS_FILE (Applying isolated newuname hook)..."
-    
-    awk '
-    BEGIN { 
-        header_added = 0; 
-        in_newuname = 0;
-    }
+    echo "[+] Patching $SYS_FILE..."
+    if ! grep -q "susfs_is_uname_spoof_buffer_set" "$SYS_FILE"; then
+        cp "$SYS_FILE" "${SYS_FILE}.bak"
+        # 使用 AWK 状态机精准区分 newuname 和 olduname，完美替代长正则
+        awk '
+        BEGIN { in_old_uname = 0 }
+        
+        # 标记是否进入了老版本的 uname 系统调用
+        /SYSCALL_DEFINE1\((old)?uname,/ { in_old_uname = 1 }
+        /^}/ { in_old_uname = 0 }
 
-    /SYSCALL_DEFINE1\(newuname, struct new_utsname __user \*, name\)/ {
-        if (!header_added) {
+        /SYSCALL_DEFINE1\(newuname, struct new_utsname __user \*, name\)/ {
             print "#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME"
+            print "extern struct static_key_false susfs_is_uname_spoof_buffer_set;"
             print "extern void susfs_spoof_uname(struct new_utsname* tmp);"
             print "#endif"
-            header_added = 1
         }
-        in_newuname = 1
-    }
-
-    /up_read\(&uts_sem\);/ {
-        if (in_newuname == 1) {
+        
+        /memcpy\(&tmp, utsname\(\), sizeof\(tmp\)\);/ {
+            print $0
             print "#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME"
-            print "\tsusfs_spoof_uname(&tmp);"
+            print "\tif (static_branch_likely(&susfs_is_uname_spoof_buffer_set)) {"
+            
+            if (in_old_uname) {
+                # 针对 old_uname 增加安全保护壳，防止结构体大小不一致导致的栈溢出
+                print "\t\tstruct new_utsname tmp_new;"
+                print "\t\tmemcpy(&tmp_new, utsname(), sizeof(struct new_utsname));"
+                print "\t\tsusfs_spoof_uname(&tmp_new);"
+                print "\t\tmemcpy(&tmp, &tmp_new, sizeof(struct old_utsname));"
+            } else {
+                # newuname 正常逻辑
+                print "\t\tsusfs_spoof_uname(&tmp);"
+            }
+            
+            print "\t}"
             print "#endif"
-            in_newuname = 0
+            next
         }
-    }
-
-    /^}/ {
-        in_newuname = 0
-    }
-
-    { print }
-    ' "$SYS_FILE" > "${SYS_FILE}.tmp" && mv "${SYS_FILE}.tmp" "$SYS_FILE"
+        { print }
+        ' "$SYS_FILE" > "${SYS_FILE}.tmp" && mv "${SYS_FILE}.tmp" "$SYS_FILE"
+    fi
 fi
-
 
 echo "🎉 [SusFS Rescue Engine] ASCII-Safe patch completed. Safe to compile now!"
