@@ -1,24 +1,27 @@
 #!/bin/bash
-
 # =====================================================================
-# 🚀 SusFS 2.1.0 Patch Fixer for Crux Kernel 4.14.357 (Pure Shell Edition)
+# 🚀 SusFS 2.1.0 Total Patch Fixer (Dual State-Machine Ultimate Edition)
+# 场景：GitHub Actions 自动化流水线 (全量、零污染、纯 BASH + AWK)
+# 特性：cmdline.c 与 sys.c 双状态机护航，彻底解决多同名点误触问题
 # =====================================================================
 
 set -e
 
-echo "🚀 [SusFS Rescue Engine] Starting pure bash repair and logic fix for failed hunks..."
+echo "🚀 [SusFS Rescue Engine] Starting total dual state-machine patch integration..."
 
 # ---------------------------------------------------------------------
-# 1. 修复 fs/namespace.c (适配全新 ida_alloc_min 与 ida_free)
+# 1. 修复 fs/namespace.c (解决 3 处 Hunk FAILED，适配新版 IDA API)
 # ---------------------------------------------------------------------
 NAMESPACE_FILE="fs/namespace.c"
 if [ -f "$NAMESPACE_FILE" ]; then
-    echo "[+] Patching $NAMESPACE_FILE..."
-    cp "$NAMESPACE_FILE" "${NAMESPACE_FILE}.bak"
+    echo "[+] Patching $NAMESPACE_FILE (Reconciling ID management with standard IDA API)..."
+    
     awk '
-    # 重写 mnt_free_id
+    BEGIN { patched_free = 0; patched_alloc = 0; }
+
+    # 全量拦截并重写 mnt_free_id 块
     /static void mnt_free_id\(struct mount \*mnt\)/, /^}/ {
-        if ($0 ~ /static void mnt_free_id/) {
+        if (!patched_free) {
             print "static void mnt_free_id(struct mount *mnt)"
             print "{"
             print "#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT"
@@ -28,12 +31,14 @@ if [ -f "$NAMESPACE_FILE" ]; then
             print ""
             print "\tida_free(&mnt_id_ida, mnt->mnt_id);"
             print "}"
+            patched_free = 1
         }
         next
     }
-    # 重写 mnt_alloc_group_id
+
+    # 全量拦截并重写 mnt_alloc_group_id 块
     /static int mnt_alloc_group_id\(struct mount \*mnt\)/, /^}/ {
-        if ($0 ~ /static int mnt_alloc_group_id/) {
+        if (!patched_alloc) {
             print "static int mnt_alloc_group_id(struct mount *mnt)"
             print "{"
             print "\tint res;"
@@ -54,42 +59,60 @@ if [ -f "$NAMESPACE_FILE" ]; then
             print "\tmnt->mnt_group_id = res;"
             print "\treturn 0;"
             print "}"
+            patched_alloc = 1
         }
         next
     }
+
     { print }
     ' "$NAMESPACE_FILE" > "${NAMESPACE_FILE}.tmp" && mv "${NAMESPACE_FILE}.tmp" "$NAMESPACE_FILE"
 fi
 
 # ---------------------------------------------------------------------
-# 2. 修复 fs/proc/cmdline.c (解决 Spoof Cmdline 冲突及格式化致命Bug)
+# 2. 修复 fs/proc/cmdline.c (状态机精确卡位：只在 cmdline_proc_show 内注入)
 # ---------------------------------------------------------------------
 CMDLINE_FILE="fs/proc/cmdline.c"
 if [ -f "$CMDLINE_FILE" ]; then
-    echo "[+] Patching $CMDLINE_FILE..."
-    if ! grep -q "susfs_spoof_cmdline_or_bootconfig" "$CMDLINE_FILE"; then
-        cp "$CMDLINE_FILE" "${CMDLINE_FILE}.bak"
-        awk '
-        /static int cmdline_proc_show/ && !header_added {
+    echo "[+] Patching $CMDLINE_FILE (Applying isolated cmdline spoof hook)..."
+    
+    awk '
+    BEGIN { 
+        header_added = 0; 
+        in_cmdline_show = 0;  # 状态机：是否正处于 cmdline_proc_show 内
+    }
+
+    # 1. 匹配到目标函数入口，激活状态机，并在上方声明外部函数
+    /static int cmdline_proc_show/ {
+        if (!header_added) {
             print "#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG"
-            print "extern struct static_key_false susfs_is_fake_cmdline_or_bootconfig_buffer_set;"
-            print "extern void susfs_spoof_cmdline_or_bootconfig(struct seq_file *m);"
-            print "#endif\n"
+            print "extern int susfs_spoof_cmdline_or_bootconfig(struct seq_file *m);"
+            print "#endif"
+            print ""
             header_added = 1
         }
-        /seq_printf\(m,\s*"%s\\n",\s*saved_command_line\);/ {
+        in_cmdline_show = 1  # 开启安全过滤防线
+    }
+
+    # 2. 只有当处于函数体内，且首次撞见目标宏时，进行精准插桩
+    /#ifdef CONFIG_INITRAMFS_IGNORE_SKIP_FLAG/ {
+        if (in_cmdline_show == 1) {
             print "#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG"
-            print "\tif (static_branch_likely(&susfs_is_fake_cmdline_or_bootconfig_buffer_set)) {"
-            print "\t\tsusfs_spoof_cmdline_or_bootconfig(m);"
+            print "\tif (!susfs_spoof_cmdline_or_bootconfig(m)) {"
+            print "\t\tseq_putc(m, '\''\\n'\'');"
             print "\t\treturn 0;"
             print "\t}"
             print "#endif"
-            print $0
-            next
+            in_cmdline_show = 0  # 注入达成，立刻关闭状态机，防止波及后面的 init 等函数
         }
-        { print }
-        ' "$CMDLINE_FILE" > "${CMDLINE_FILE}.tmp" && mv "${CMDLINE_FILE}.tmp" "$CMDLINE_FILE"
-    fi
+    }
+
+    # 3. 兜底清除状态
+    /^}/ {
+        in_cmdline_show = 0
+    }
+
+    { print }
+    ' "$CMDLINE_FILE" > "${CMDLINE_FILE}.tmp" && mv "${CMDLINE_FILE}.tmp" "$CMDLINE_FILE"
 fi
 
 # ---------------------------------------------------------------------
@@ -98,102 +121,93 @@ fi
 TASK_MMU_FILE="fs/proc/task_mmu.c"
 if [ -f "$TASK_MMU_FILE" ]; then
     echo "[+] Patching $TASK_MMU_FILE..."
-    if ! grep -q "susfs_def.h" "$TASK_MMU_FILE"; then
-        cp "$TASK_MMU_FILE" "${TASK_MMU_FILE}.bak"
-        awk '
-        /#include <linux\/ctype\.h>/ {
-            print $0
-            print "#if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)"
-            print "#include <linux/susfs_def.h>"
-            print "#endif"
-            next
-        }
-        /seq_printf\(m,\s*"Size:/ {
-            print "#ifdef CONFIG_KSU_SUSFS_SUS_MAP"
-            print "\tif (vma->vm_file) {"
-            print "\t\tif (SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))"
-            print "\t\t\treturn 0;"
-            print "\t}"
-            print "#endif"
-            print $0
-            next
-        }
-        /arch_show_smap\(m, vma\);/ {
-            print "#ifdef CONFIG_KSU_SUSFS_SUS_MAP"
-            print "\tif (vma->vm_file) {"
-            print "\t\tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))"
-            print "\t\t\tgoto bypass_orig_flow;"
-            print "\t}"
-            print "#endif"
-            print $0
-            next
-        }
-        /show_smap_vma_flags\(m, vma\);/ {
-            print $0
-            print ""
-            print "#ifdef CONFIG_KSU_SUSFS_SUS_MAP"
-            print "bypass_orig_flow:"
-            print "#endif"
-            next
-        }
-        # 修复 susfs_open_redirect_spoof_show_map_vma 指针崩溃与内存泄漏
-        /extern int susfs_open_redirect_spoof_show_map_vma/ {
-            sub(/char \*spoofed_name/, "char **spoofed_name")
-        }
-        /susfs_open_redirect_spoof_show_map_vma\(inode, &ino, &dev, spoofed_redirected_name\)/ {
-            sub(/spoofed_redirected_name/, "\\&spoofed_redirected_name")
-        }
-        { print }
-        ' "$TASK_MMU_FILE" > "${TASK_MMU_FILE}.tmp" && mv "${TASK_MMU_FILE}.tmp" "$TASK_MMU_FILE"
-    fi
+    
+    awk '
+    /#include <linux\/ctype\.h>/ {
+        print $0
+        print "#if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)"
+        print "#include <linux/susfs_def.h>"
+        print "#endif"
+        next
+    }
+    /seq_printf\(m,\s*"Size:/ {
+        print "#ifdef CONFIG_KSU_SUSFS_SUS_MAP"
+        print "\tif (vma->vm_file) {"
+        print "\t\tif (SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))"
+        print "\t\t\treturn 0;"
+        print "\t}"
+        print "#endif"
+        print $0
+        next
+    }
+    /arch_show_smap\(m, vma\);/ {
+        print "#ifdef CONFIG_KSU_SUSFS_SUS_MAP"
+        print "\tif (vma->vm_file) {"
+        print "\t\tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))"
+        print "\t\t\tgoto bypass_orig_flow;"
+        print "\t}"
+        print "#endif"
+        print $0
+        next
+    }
+    /show_smap_vma_flags\(m, vma\);/ {
+        print $0
+        print ""
+        print "#ifdef CONFIG_KSU_SUSFS_SUS_MAP"
+        print "bypass_orig_flow:"
+        print "#endif"
+        next
+    }
+    /extern int susfs_open_redirect_spoof_show_map_vma/ {
+        sub(/char \*spoofed_name/, "char **spoofed_name")
+    }
+    /susfs_open_redirect_spoof_show_map_vma\(inode, &ino, &dev, spoofed_redirected_name\)/ {
+        sub(/spoofed_redirected_name/, "\\&spoofed_redirected_name")
+    }
+    { print }
+    ' "$TASK_MMU_FILE" > "${TASK_MMU_FILE}.tmp" && mv "${TASK_MMU_FILE}.tmp" "$TASK_MMU_FILE"
 fi
 
 # ---------------------------------------------------------------------
-# 4. 修复 kernel/sys.c (解决 Spoof Uname 冲突及内核栈越界改写)
+# 4. 修复 kernel/sys.c (状态机护航：只在 newuname 内进行 SusFS 2.0.0 注入)
 # ---------------------------------------------------------------------
 SYS_FILE="kernel/sys.c"
 if [ -f "$SYS_FILE" ]; then
-    echo "[+] Patching $SYS_FILE..."
-    if ! grep -q "susfs_is_uname_spoof_buffer_set" "$SYS_FILE"; then
-        cp "$SYS_FILE" "${SYS_FILE}.bak"
-        # 使用 AWK 状态机精准区分 newuname 和 olduname，完美替代长正则
-        awk '
-        BEGIN { in_old_uname = 0 }
-        
-        # 标记是否进入了老版本的 uname 系统调用
-        /SYSCALL_DEFINE1\((old)?uname,/ { in_old_uname = 1 }
-        /^}/ { in_old_uname = 0 }
+    echo "[+] Patching $SYS_FILE (Applying isolated newuname hook)..."
+    
+    awk '
+    BEGIN { 
+        header_added = 0; 
+        in_newuname = 0;
+    }
 
-        /SYSCALL_DEFINE1\(newuname, struct new_utsname __user \*, name\)/ {
+    # 1. 拦截 newuname 系统调用入口点
+    /SYSCALL_DEFINE1\(newuname, struct new_utsname __user \*, name\)/ {
+        if (!header_added) {
             print "#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME"
-            print "extern struct static_key_false susfs_is_uname_spoof_buffer_set;"
             print "extern void susfs_spoof_uname(struct new_utsname* tmp);"
             print "#endif"
+            header_added = 1
         }
-        
-        /memcpy\(&tmp, utsname\(\), sizeof\(tmp\)\);/ {
-            print $0
+        in_newuname = 1
+    }
+
+    # 2. 如果状态机处于激活状态，且撞到了 up_read(&uts_sem);
+    /up_read\(&uts_sem\);/ {
+        if (in_newuname == 1) {
             print "#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME"
-            print "\tif (static_branch_likely(&susfs_is_uname_spoof_buffer_set)) {"
-            
-            if (in_old_uname) {
-                # 针对 old_uname 增加安全保护壳，防止结构体大小不一致导致的栈溢出
-                print "\t\tstruct new_utsname tmp_new;"
-                print "\t\tmemcpy(&tmp_new, utsname(), sizeof(struct new_utsname));"
-                print "\t\tsusfs_spoof_uname(&tmp_new);"
-                print "\t\tmemcpy(&tmp, &tmp_new, sizeof(struct old_utsname));"
-            } else {
-                # newuname 正常逻辑
-                print "\t\tsusfs_spoof_uname(&tmp);"
-            }
-            
-            print "\t}"
+            print "\tsusfs_spoof_uname(&tmp);"
             print "#endif"
-            next
+            in_newuname = 0
         }
-        { print }
-        ' "$SYS_FILE" > "${SYS_FILE}.tmp" && mv "${SYS_FILE}.tmp" "$SYS_FILE"
-    fi
+    }
+
+    /^}/ {
+        in_newuname = 0
+    }
+
+    { print }
+    ' "$SYS_FILE" > "${SYS_FILE}.tmp" && mv "${SYS_FILE}.tmp" "$SYS_FILE"
 fi
 
-echo "🎉 [SusFS Rescue Engine] All failed hunks fixed successfully! Zero Python dependencies!"
+echo "🎉 [SusFS Rescue Engine] Double state-machine patching complete! Ready to compile safely!"
