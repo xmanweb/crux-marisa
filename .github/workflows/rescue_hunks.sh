@@ -69,34 +69,51 @@ if [ -f "$NAMESPACE_FILE" ]; then
 fi
 
 # ---------------------------------------------------------------------
-# 2. 修复 fs/proc/cmdline.c (解决 Spoof Cmdline 冲突及格式化致命Bug)
+# 2. 修复 fs/proc/cmdline.c (根据指定特性精准重构注入)
 # ---------------------------------------------------------------------
 CMDLINE_FILE="fs/proc/cmdline.c"
 if [ -f "$CMDLINE_FILE" ]; then
-    echo "[+] Patching $CMDLINE_FILE..."
-    if ! grep -q "susfs_spoof_cmdline_or_bootconfig" "$CMDLINE_FILE"; then
-        cp "$CMDLINE_FILE" "${CMDLINE_FILE}.bak"
-        awk '
-        /static int cmdline_proc_show/ && !header_added {
+    echo "[+] Patching $CMDLINE_FILE (Applying target static_branch cmdline hook)..."
+    
+    awk '
+    BEGIN { 
+        header_added = 0; 
+        in_cmdline_show = 0;
+    }
+
+    # 1. 匹配到目标函数入口，激活状态机，并在其上方注入指定的 extern 变量与函数声明
+    /static int cmdline_proc_show/ {
+        if (!header_added) {
             print "#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG"
             print "extern struct static_key_false susfs_is_fake_cmdline_or_bootconfig_buffer_set;"
             print "extern void susfs_spoof_cmdline_or_bootconfig(struct seq_file *m);"
-            print "#endif\n"
+            print "#endif"
+            print ""
             header_added = 1
         }
-        /seq_printf\(m,\s*"%s\\n",\s*saved_command_line\);/ {
+        in_cmdline_show = 1
+    }
+
+    # 2. 在函数体内，精准赶在第一个 #ifdef CONFIG_INITRAMFS_IGNORE_SKIP_FLAG 前下网
+    /#ifdef CONFIG_INITRAMFS_IGNORE_SKIP_FLAG/ {
+        if (in_cmdline_show == 1) {
             print "#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG"
             print "\tif (static_branch_likely(&susfs_is_fake_cmdline_or_bootconfig_buffer_set)) {"
             print "\t\tsusfs_spoof_cmdline_or_bootconfig(m);"
+            print "\t\tseq_printf(m, \"%s\\n\");"
             print "\t\treturn 0;"
             print "\t}"
             print "#endif"
-            print $0
-            next
+            in_cmdline_show = 0  # 核心逻辑注入完毕，立刻关闭状态机
         }
-        { print }
-        ' "$CMDLINE_FILE" > "${CMDLINE_FILE}.tmp" && mv "${CMDLINE_FILE}.tmp" "$CMDLINE_FILE"
-    fi
+    }
+
+    /^}/ {
+        in_cmdline_show = 0
+    }
+
+    { print }
+    ' "$CMDLINE_FILE" > "${CMDLINE_FILE}.tmp" && mv "${CMDLINE_FILE}.tmp" "$CMDLINE_FILE"
 fi
 
 # ---------------------------------------------------------------------
@@ -263,51 +280,49 @@ if [ -f "$TASK_MMU_FILE" ]; then
 fi
 
 # ---------------------------------------------------------------------
-# 4. 修复 kernel/sys.c (解决 Spoof Uname 冲突及内核栈越界改写)
+# 4. 修复 kernel/sys.c (精准对接：在 newuname 内的 memcpy 下方插桩)
 # ---------------------------------------------------------------------
 SYS_FILE="kernel/sys.c"
 if [ -f "$SYS_FILE" ]; then
-    echo "[+] Patching $SYS_FILE..."
-    if ! grep -q "susfs_is_uname_spoof_buffer_set" "$SYS_FILE"; then
-        cp "$SYS_FILE" "${SYS_FILE}.bak"
-        # 使用 AWK 状态机精准区分 newuname 和 olduname，完美替代长正则
-        awk '
-        BEGIN { in_old_uname = 0 }
-        
-        # 标记是否进入了老版本的 uname 系统调用
-        /SYSCALL_DEFINE1\((old)?uname,/ { in_old_uname = 1 }
-        /^}/ { in_old_uname = 0 }
+    echo "[+] Patching $SYS_FILE (Applying isolated static_branch Uname hook via memcpy)..."
+    
+    awk '
+    BEGIN { 
+        header_added = 0; 
+        in_newuname = 0;
+    }
 
-        /SYSCALL_DEFINE1\(newuname, struct new_utsname __user \*, name\)/ {
+    # 1. 拦截 newuname 系统调用入口点，注入对应的全局变量与 extern 声明
+    /SYSCALL_DEFINE1\(newuname, struct new_utsname __user \*, name\)/ {
+        if (!header_added) {
             print "#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME"
             print "extern struct static_key_false susfs_is_uname_spoof_buffer_set;"
             print "extern void susfs_spoof_uname(struct new_utsname* tmp);"
             print "#endif"
+            header_added = 1
         }
-        
-        /memcpy\(&tmp, utsname\(\), sizeof\(tmp\)\);/ {
-            print $0
+        in_newuname = 1
+    }
+
+    # 2. 如果状态机处于激活状态，且撞到了数据拷贝结束点 memcpy(&tmp, utsname(), sizeof(tmp));
+    /memcpy\(&tmp, utsname\(\), sizeof\(tmp\)\);/ {
+        print $0  # 先把原原本本的 memcpy 这一行打印出来
+        if (in_newuname == 1) {
             print "#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME"
-            print "\tif (static_branch_likely(&susfs_is_uname_spoof_buffer_set)) {"
-            
-            if (in_old_uname) {
-                # 针对 old_uname 增加安全保护壳，防止结构体大小不一致导致的栈溢出
-                print "\t\tstruct new_utsname tmp_new;"
-                print "\t\tmemcpy(&tmp_new, utsname(), sizeof(struct new_utsname));"
-                print "\t\tsusfs_spoof_uname(&tmp_new);"
-                print "\t\tmemcpy(&tmp, &tmp_new, sizeof(struct old_utsname));"
-            } else {
-                # newuname 正常逻辑
-                print "\t\tsusfs_spoof_uname(&tmp);"
-            }
-            
-            print "\t}"
+            print "\tif (static_branch_likely(&susfs_is_uname_spoof_buffer_set))"
+            print "\t\tsusfs_spoof_uname(&tmp);"
             print "#endif"
-            next
+            in_newuname = 0 # 注入完毕，立刻关闭状态机，防止波及后续的宏定义和系统调用
         }
-        { print }
-        ' "$SYS_FILE" > "${SYS_FILE}.tmp" && mv "${SYS_FILE}.tmp" "$SYS_FILE"
-    fi
+        next  # 跳过普通打印，防止该行重复
+    }
+
+    /^}/ {
+        in_newuname = 0
+    }
+
+    { print }
+    ' "$SYS_FILE" > "${SYS_FILE}.tmp" && mv "${SYS_FILE}.tmp" "$SYS_FILE"
 fi
 
 echo "🎉 [SusFS Rescue Engine] ASCII-Safe patch completed. Safe to compile now!"
