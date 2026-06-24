@@ -170,34 +170,45 @@ jobs:
           TARGET_CONFIG="arch/arm64/configs/crux_defconfig"
 
           if [ ! -f "$TARGET_CONFIG" ]; then
-            echo "❌ ERROR: $TARGET_CONFIG not found! Make sure checkout and paths are correct."
+            echo "❌ ERROR: $TARGET_CONFIG not found! 请检查源码检出路径是否正确。"
             exit 1
           fi
 
           echo "====================================================================="
-          echo " 🛡️  STEP 1: PATCHING BASEBAND GUARD & CONFIGURING LSM"
+          echo " 🛡️  STEP 1: PATCHING BASEBAND GUARD (FORCE 4.14 NONGKI LEGACY PATH)"
           echo "====================================================================="
+          
+          # 【精准欺骗】将 #define DEFINE_LSM(lsm) 临时替换掉，强迫官方脚本识别为老内核并走源码 Patch 路线
+          if [ -f "include/linux/lsm_hooks.h" ]; then
+            echo "[+] Patching lsm_hooks.h to bypass misdetection..."
+            sed -i 's/#define DEFINE_LSM(lsm)/#define FAKE_DEFINE_LSM(lsm)/g' include/linux/lsm_hooks.h
+          fi
+
+          # 执行官方设置脚本（此时它会正确识别并打印 "Modern LSM infrastructure not detected... Applying Selinux patch..."）
           wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
           
-          echo "CONFIG_BBG=y" >> "$TARGET_CONFIG"
-          # 默认开启阻止启动行为 (相当于 BASEBAND_GUARD_BOOT == true)
-          echo "CONFIG_BBG_BLOCK_BOOT=y" >> "$TARGET_CONFIG"
-
-          if grep -q "DEFINE_LSM" "include/linux/lsm_hooks.h" && ! grep -q "baseband_guard" "$TARGET_CONFIG"; then
-            echo "[+] LSM Detection Engine: Found DEFINE_LSM in lsm_hooks.h"
-            
-            if ! grep -rq "CONFIG_LSM=" "$TARGET_CONFIG" && grep -q "bpf" "security/Kconfig"; then
-              echo "[-] Mode A: No default CONFIG_LSM found. BPF detected. Appending full LSM array."
-              echo 'CONFIG_LSM="lockdown,yama,loadpin,safesetid,integrity,selinux,smack,tomoyo,apparmor,bpf,baseband_guard"' >> "$TARGET_CONFIG"
-            elif ! grep -rq "CONFIG_LSM=" "$TARGET_CONFIG"; then
-              echo "[-] Mode B: No default CONFIG_LSM found. Appending legacy LSM array."
-              echo 'CONFIG_LSM="lockdown,yama,loadpin,safesetid,integrity,selinux,smack,tomoyo,apparmor,baseband_guard"' >> "$TARGET_CONFIG"
-            else
-              echo "[+] Mode C: Found pre-defined CONFIG_LSM value. Injecting inline..."
-              sed -i 's/\(CONFIG_LSM="[^"]*\)"/\1,baseband_guard"/' "$TARGET_CONFIG"
-            fi
+          # 【完美恢复】恢复原本的宏定义，确保内核后续的正常编译
+          if [ -f "include/linux/lsm_hooks.h" ]; then
+            echo "[+] Restoring lsm_hooks.h structural definition..."
+            sed -i 's/#define FAKE_DEFINE_LSM(lsm)/#define DEFINE_LSM(lsm)/g' include/linux/lsm_hooks.h
           fi
-          echo "[+] Patched Baseband Guard Successfully."
+
+          # 将配置注入到你的 crux_defconfig 末尾
+          echo "CONFIG_BBG=y" >> "$TARGET_CONFIG"
+          
+          # 【根据你的 Kconfig 修正】确认为当前版本的正确宏命名，开启 Boot 分区防刷保护
+          # echo "CONFIG_BBG_BLOCK_BOOT=y" >> "$TARGET_CONFIG"
+
+          # 如果你想连 Recovery 分区的防格防刷保护也一起开启，可以取消下面这行的注释：
+          # echo "CONFIG_BBG_BLOCK_RECOVERY=y" >> "$TARGET_CONFIG"
+
+          # 利用安全模块 Kconfig 注入，在不支持 CONFIG_LSM 动态解析的老内核中，确保双层编译保险
+          if grep -q "config LSM" security/Kconfig; then
+            echo "[+] Injecting baseband_guard default array into security/Kconfig..."
+            sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
+          fi
+          
+          echo "[+] Patched Baseband Guard for 4.14 Non-GKI Successfully."
 
           echo "====================================================================="
           echo " ⚡ STEP 2: PATCHING REKERNEL CORE ENGINE"
@@ -207,7 +218,7 @@ jobs:
           chmod +x rekernel_patches.sh
           bash rekernel_patches.sh || echo "Notice: Rekernel patches adaptation executed."
 
-          # 获取并应用 rekernel_extra 修复补丁
+          # 获取并应用 rekernel_extra 修复补丁，解决非 GKI 编译冲突
           mkdir -p drivers/rekernel
           curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Rekernel/rekernel_extra.patch" -o rekernel_extra.patch
           if [ -f "rekernel_extra.patch" ]; then
@@ -217,6 +228,7 @@ jobs:
           echo "CONFIG_REKERNEL=y" >> "$TARGET_CONFIG"
           echo "[+] Patched Re:Kernel for crux Successfully."
           echo "====================================================================="
+          
       - name: Start Kernel Compilation
         run: |
           cd $GITHUB_WORKSPACE
