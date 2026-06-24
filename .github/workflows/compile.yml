@@ -211,20 +211,23 @@ jobs:
           echo "[+] Patched Baseband Guard for 4.14 Non-GKI Successfully."
 
           echo "====================================================================="
-          echo " ⚡ STEP 2: PATCHING REKERNEL FULL SYSTEM CORE (BASE64 SAFE METHOD)"
+          echo " ⚡ STEP 2: PATCHING REKERNEL FULL SYSTEM CORE (SED-BASE64 METHOD)"
           echo "====================================================================="
+          # 1. 建立核心驱动目录并拉取完整的 rekernel 核心源码文件
           mkdir -p drivers/rekernel
           curl -fsSL "https://raw.githubusercontent.com/Sakion-Team/Re-Kernel/main/Integrate/rekernel/rekernel.c" -o drivers/rekernel/rekernel.c
           curl -fsSL "https://raw.githubusercontent.com/Sakion-Team/Re-Kernel/main/Integrate/rekernel/rekernel.h" -o drivers/rekernel/rekernel.h
           curl -fsSL "https://raw.githubusercontent.com/Sakion-Team/Re-Kernel/main/Integrate/rekernel/Kconfig" -o drivers/rekernel/Kconfig
           curl -fsSL "https://raw.githubusercontent.com/Sakion-Team/Re-Kernel/main/Integrate/rekernel/Makefile" -o drivers/rekernel/Makefile
 
+          # 2. 解决与小米 Millet 基础设施的 frozen_task_group 命名冲突
           if [ -f "drivers/rekernel/rekernel.h" ]; then
             echo "[+] Fixing symbol conflicts with Xiaomi Millet (frozen_task_group)..."
             sed -i 's/frozen_task_group/rekernel_frozen_task_group/g' drivers/rekernel/rekernel.h
             sed -i 's/frozen_task_group/rekernel_frozen_task_group/g' drivers/rekernel/rekernel.c
           fi
 
+          # 3. 动态对底层核心 Kconfig 和 Makefile 注入编译链接
           if ! grep -q "rekernel" drivers/Kconfig; then
             sed -i '/endmenu/i\\nsource "drivers/rekernel/Kconfig"' drivers/Kconfig
           fi
@@ -232,24 +235,42 @@ jobs:
             sed -i '$a\obj-$(CONFIG_REKERNEL) += rekernel/' drivers/Makefile
           fi
 
-          # 用纯英文字符 base64 解密生成 binder.c 补丁，彻底绕过 YML 解析错误
-          echo "[+] Decoding binder.c patch from safe Base64 stream..."
-          echo "LS0tIGEvZHJpdmVycy9hbmRyb2lkL2JpbmRlci5jCisrKyBiL2RyaXZlcnMvYW5kcm9pZC9iaW5kZXIuYwpAQCAtNDAsNiArNDAsOSBAQAogI2luY2x1ZGUgPGxpbnV4L3Rhc2tfd29yay5oPgogI2luY2x1ZGUgPGxpbnV4L3NpemVzLmg+CiAKKyNpZmRlZiBDT05GSUdfUkVLRVJORUwKKyNpY2x1ZGUgPC4uL3Jla2VybmVsL3Jla2VybmVsLmg+CisjZW5kaWYgLyogQ09ORklHX1JFS0VSTkVMICovCiAjaW5jbHVkZSA8dWFwaS9saW51eC9hbmRyb2lkL2JpbmRlci5oPgogI2luY2x1ZGUgImJpbmRlcl9hbGxvYy5oIgogI2luY2x1ZGUgImJpbmRlcl9pbnRlcm5hbC5oIgpAQCAtMjgyNCw2ICsyODI3LDI3IEBACiAJcmV0dXJuIHRydWU7CiB9CiAKKyNpZmRlZiBDT05GSUdfUkVLRVJORUwKK3ZvaWQgcmVrZXJuZWxfYmluZGVyX3RyYW5zYWN0aW9uKGJvb2wgcmVwbHksIHN0cnVjdCBiaW5kZXJfdHJhbnNhY3Rpb24gKnQsIHN0cnVjdCBiaW5kZXJfbm9kZSAqdGFyZ2V0X25vZGUsIHN0cnVjdCBiaW5kZXJfdHJhbnNhY3Rpb25fZGF0YSAqdHIpIHsKKwlzdHJ1Y3QgYmluZGVyX3Byb2MgKnRvX3Byb2M7CglzdHJ1Y3QgYmluZGVyX2FsbG9jICp0YXJnZXRfYWxsb2M7CglpZiAoIXQtPnRvX3Byb2MpIHJldHVybjsKKwl0b19wcm9jID0gdC0+dG9fcHJvYzsKKwlpZiAocmVwbHkpIHsKKwkJYmluZGVyX3JlcGx5X2hhbmRsZXIodGFza190Z2lkX25yKGN1cnJlbnQpLCBjdXJyZW50LCB0b19wcm9jLT5waWQsIHRvX3Byb2MtPnRzaywgZmFsc2UsIHRyKTsKKwl9IGVsc2UgaWYgKHQtPmZyb20pIHsKKwkJYmluZGVyX3RyYW5zX2hhbmRsZXIodC0+ZnJvbS0+cHJvYy0+cGlkLCB0LS5mcm9tLT5wcm9jLT50c2ssIHRvX3Byb2MtPnBpZCwgdG9fcHJvYy0+dHNrLCBmYWxzZSwgdHIpOworCX0gZWxzZSB7CisJCWJpbmRlcl90cmFuc19oYW5kbGVyKHRhc2tfdGdpZF9ucihjdXJyZW50KSwgY3VycmVudCwgdG9fcHJvYy0+cGlkLCB0b19wcm9jLT50c2ssIHRydWUsIHRyKTsKKwkJdGFyZ2V0X2FsbG9jID0gJnRvX3Byb2MtPmFsbG9jOworCQlpZiAodGFyZ2V0X2FsbG9jLT5mcmVlX2FzeW5jX3NwYWNlIDwgKHRhcmdldF9hbGxvYy0+YnVmZmVyX3NpemUgLyAxMCArIDB4MzAwKSkgeworCQkJYmluZGVyX292ZXJmbG93X2hhbmRsZXIodGFza190Z2lkX25yKGN1cnJlbnQpLCBjdXJyZW50LCB0b19wcm9jLT5waWQsIHRvX3Byb2MtPnRzaywgdHJ1ZSwgdHIpOworCQl9CisJfQorfQorI2VuZGlmIC8qIENPTkZJR19SRUtFUk5FTCAqLworCiBzdGF0aWMgdm9pZCBiaW5kZXJfdHJhbnNhY3Rpb24oc3RydWN0IGJpbmRlcl9wcm9jICpwcm9jLAogCQkJICAgICAgIHN0cnVjdCBiaW5kZXJfdGhyZWFkICp0aHJlYWQsCiAJCQkgICAgICAgc3RydWN0IGJpbmRlcl90cmFuc2FjdGlvbl9kYXRhICp0ciwgaW50IHJlcGx5LApAQCAtMzQyMCw2ICszNDQ0LDkgQEAKIAkJCWdvdG8gZXJyX2JhZF9vYmplY3RfdHlwZTsKIAkJfQogCX0KKyNpZmRlZiBDT05GSUdfUkVLRVJORUwKKwlyZWtlcm5lbF9iaW5kZXJfdHJhbnNhY3Rpb24ocmVwbHksIHQsIHRhcmdldF9ub2RlLCB0cik7CisjZW5kaWYgLyogQ09ORklHX1JFS0VSTkVMICovCiAJdC0+Y29tcGxldGUgPSAxOwogCWJpbmRlcl9lbnF1ZXVlX3dvcmtfaWxvY2tlZCgmdC0+d29yaywgJnByb2MtPnRvZG8pOwogCWlmIChyZXBseSkgew==" | base64 -d > bbg_rekernel_binder.patch
-          
-          if [ -f "drivers/android/binder.c" ]; then
-            patch -p1 < bbg_rekernel_binder.patch || echo "Notice: Binder patch applied."
+          # 4. 对 drivers/android/binder.c 进行免格式干扰的安全 sed 注入
+          if [ -f "drivers/android/binder.c" ] && ! grep -q "CONFIG_REKERNEL" drivers/android/binder.c; then
+            echo "[+] Injecting ReKernel Binder Core Hooks into binder.c..."
+            
+            # 注入头文件包含
+            sed -i '/#include <uapi\/linux\/android\/binder.h>/i\#ifdef CONFIG_REKERNEL\n#include <../rekernel/rekernel.h>\n#endif /* CONFIG_REKERNEL */' drivers/android/binder.c
+            
+            # 解密并注入事务处理核心 Hook 函数
+            BINDER_FUNC_BASE64="I2lmZGVmIENPT05GSUdfUkVLRVJORUwKdm9pZCByZWtlcm5lbF9iaW5kZXJfdHJhbnNhY3Rpb24oYm9vbCByZXBseSwgc3RydWN0IGJpbmRlcl90cmFuc2FjdGlvbiAqdCwgc3RydWN0IGJpbmRlcl9ub2RlICp0YXJnZXRfbm9kZSwgc3RydWN0IGJpbmRlcl90cmFuc2FjdGlvbl9kYXRhICp0cikgewoJc3RydWN0IGJpbmRlcl9wcm9jICp0b19wcm9jOwoJc3RydWN0IGJpbmRlcl9hbGxvYyAqdGFyZ2V0X2FsbG9jOwoJaWYgKCF0LT50b19wcm9jKSByZXR1cm47Cgl0b19wcm9jID0gdC0+dG9fcHJvYzsKCWlmIChyZXBseSkgewoJCWJpbmRlcl9yZXBseV9hhYW5kbGVyKHRhc2tfdGdpZF9ucihjdXJyZW50KSwgY3VycmVudCwgdG9fcHJvYy0+cGlkLCB0b19wcm9jLT50c2ssIHRydWUsIHRyKTsKCX0gZWxzZSBpZiAoKHQtPmZyb20pICYmICh0LT5mcm9tLT5wcm9jKSkgewoJCWJpbmRlcl90cmFuc19oYW5kbGVyKHQtPmZyb20tPnByb2MtPnBpZCwgdC0+ZnJvbS0+cHJvYy0+dHNrLCB0b19wcm9jLT5waWQsIHRvX3Byb2MtPnRzaywgZmFsc2UsIHRyKTsKCX0gZWxzZSB7CisJCWJpbmRlcl90cmFuc19oYW5kbGVyKHRhc2tfdGdpZF9ucihjdXJyZW50KSwgY3VycmVudCwgdG9fcHJvYy0+cGlkLCB0b19wcm9jLT50c2ssIHRydWUsIHRyKTsKCQl0YXJnZXRfYWxsb2MgPSAmdG9fcHJvYy0+YWxsb2M7CgkJaWYgKHRhcmdldF9hbGxvYy0+ZnJlZV9hc3luY19zcGFjZSA8ICh0YXJnZXRfYWxsb2MtPmJ1ZmZlcl9zaXplIC8gMTAgKyAweDMwMCkpIHsKCQkJYmluZGVyX292ZXJmbG93X2hhbmRsZXIodGFza190Z2lkX25yKGN1cnJlbnQpLCBjdXJyZW50LCB0b19wcm9jLT5waWQsIHRvX3Byb2MtPnRzaywgdHJ1ZSwgdHIpOoKCQl9Cgl9Cn0KI2VuZGlmIC8qIENPTkZJR19SRUtFUk5FTCAqLw=="
+            BINDER_FUNC=$(echo "$BINDER_FUNC_BASE64" | base64 -d)
+            
+            # 使用 awk 准确定位原函数首行，并在其上方塞入新函数体
+            BINDER_TARGET_LINE=$(awk '/static void binder_transaction\(struct binder_proc \*proc,/{print NR; exit}' drivers/android/binder.c)
+            if [ -n "$BINDER_TARGET_LINE" ]; then
+              sed -i "${BINDER_TARGET_LINE}i\\${BINDER_FUNC}\\n" drivers/android/binder.c
+            fi
+
+            # 挂载 trace 触发点 (直接插入到关键行为的上游)
+            sed -i '/t->complete = 1;/i\#ifdef CONFIG_REKERNEL\n\trekernel_binder_transaction(reply, t, target_node, tr);\n#endif /* CONFIG_REKERNEL */' drivers/android/binder.c
           fi
 
-          # 用纯英文字符 base64 解密生成 signal.c 补丁
-          echo "[+] Decoding signal.c patch from safe Base64 stream..."
-          echo "LS0tIGEva2VybmVsL3NpZ25hbC5jCisrKyBiL2tlcm5lbC9zaWduaWwuYwpAQCAtNDQsNiArNDQsMTAgQEAKICNpbmNsdWRlIDxsaW51eC9jb21waWxlci5oPgogI2luY2x1ZGUgPGxpbnV4L2NuX3Byb2MuaD4KICNpbmNsdWRlIDxsaW51eC9jb21waWxlci5oPgorI2lmZGVmIENPTkZJR19SRUtFUk5FTAorI2luY2x1ZGUgPHVhcGkvYXNtL3NpZ25hbC5oCisjaW5jbHVkZSA8Li4vZHJpdmVycy9yZWtlcm5lbC9yZWtlcm5lbC5oPgorI2VuZGlmIC8qIENPTkZJR19SRUtFUk5FTCAqLwogCiAjZGVmaW5lIENSRUFURV9UUkFDRV9QT0lOVFMKICNpbmNsdWRlIDx0cmFjZS9ldmVudHMvc2lnbmFsLmg+CkBAIC03OTYsNiArODAwLDkgQEAKIAlzdHJ1Y3Qgc2lncXVldWUgKnEgPSBOVUxMOwogCWludCByZXQgPSAtRVNSQ0g7CiAKKyNpZmRlZiBDT05GSUdfUkVLRVJORUwKKwlpZiAoc2lnID09IFNJR0tMTEwgfHwgc2lnID09IFNJR1RFUk0gfHwgc2lnID09IFNJR0FCUlQgfHwgc2lnID09IFNJR1FVSVQpIHJla2VybmVsX3JlcG9ydChTSUdOQUwsIHNpZywgdGFza190Z2lkX25yKGN1cnJlbnQpLCBjdXJyZW50LCB0YXNrX3RnaWRfbnIocCksIHAsIGZhbHNlLCBOVUxMKTsKKyNlbmRpZiAvKiBDT05GSUdfUkVLRVJORUwUICovCiAJaWYgKHApIHsKIAkJdW5zaWduZWQgbG9uZyBmbGFnczs=" | base64 -d > bbg_rekernel_signal.patch
-
-          if [ -f "kernel/signal.c" ]; then
-            patch -p1 < bbg_rekernel_signal.patch || echo "Notice: Signal patch applied."
+          # 5. 对 kernel/signal.c 进行免格式干扰的安全 sed 注入
+          if [ -f "kernel/signal.c" ] && ! grep -q "CONFIG_REKERNEL" kernel/signal.c; then
+            echo "[+] Injecting ReKernel Signal Hooks into signal.c..."
+            
+            # 包含头文件
+            sed -i '/#include <trace\/events\/signal.h>/i\#ifdef CONFIG_REKERNEL\n#include <uapi/asm/signal.h>\n#include <../drivers/rekernel/rekernel.h>\n#endif /* CONFIG_REKERNEL */' kernel/signal.c
+            
+            # 挂载审计触发点 (定位在 int ret = -ESRCH; 之后，规避 C99 变量声明警告)
+            sed -i '/int ret = -ESRCH;/a\#ifdef CONFIG_REKERNEL\n\tif (sig == SIGKILL || sig == SIGTERM || sig == SIGABRT || sig == SIGQUIT) rekernel_report(SIGNAL, sig, task_tgid_nr(current), current, task_tgid_nr(p), p, false, NULL);\n#endif /* CONFIG_REKERNEL */' kernel/signal.c
           fi
 
+          # 6. 将最终配置正式写入你的 crux_defconfig 末尾
           echo "CONFIG_REKERNEL=y" >> "$TARGET_CONFIG"
           echo "[+] Patched Re:Kernel Full Core System for crux Successfully."
+          echo "====================================================================="
           
           
       - name: Start Kernel Compilation
