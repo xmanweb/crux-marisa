@@ -213,18 +213,18 @@ jobs:
           echo "====================================================================="
           echo " ⚡ STEP 2: PATCHING REKERNEL FULL SYSTEM CORE (OFFICIAL SAKION METHOD)"
           echo "====================================================================="
-          # 1. 建立核心驱动目录并拉取完整的 rekernel 核心源码文件
+          # 1. 建立核心驱动目录并从正确的 Integrate/ 路径拉取完整的 rekernel 核心源码文件
           mkdir -p drivers/rekernel
-          curl -fsSL "https://raw.githubusercontent.com/Sakion-Team/Re-Kernel/main/rekernel/rekernel.c" -o drivers/rekernel/rekernel.c
-          curl -fsSL "https://raw.githubusercontent.com/Sakion-Team/Re-Kernel/main/rekernel/rekernel.h" -o drivers/rekernel/rekernel.h
-          curl -fsSL "https://raw.githubusercontent.com/Sakion-Team/Re-Kernel/main/rekernel/Kconfig" -o drivers/rekernel/Kconfig
-          curl -fsSL "https://raw.githubusercontent.com/Sakion-Team/Re-Kernel/main/rekernel/Makefile" -o drivers/rekernel/Makefile
+          curl -fsSL "https://raw.githubusercontent.com/Sakion-Team/Re-Kernel/main/Integrate/rekernel/rekernel.c" -o drivers/rekernel/rekernel.c
+          curl -fsSL "https://raw.githubusercontent.com/Sakion-Team/Re-Kernel/main/Integrate/rekernel/rekernel.h" -o drivers/rekernel/rekernel.h
+          curl -fsSL "https://raw.githubusercontent.com/Sakion-Team/Re-Kernel/main/Integrate/rekernel/Kconfig" -o drivers/rekernel/Kconfig
+          curl -fsSL "https://raw.githubusercontent.com/Sakion-Team/Re-Kernel/main/Integrate/rekernel/Makefile" -o drivers/rekernel/Makefile
 
           # 2. 针对 4.14 传统内核进行 proc 接口兼容性处理
           if [ -f "drivers/rekernel/rekernel.c" ]; then
             if ! grep -q 'struct proc_ops' include/linux/proc_fs.h; then
               echo "[+] 4.14 Legacy Kernel detected. Adapting rekernel.c to file_operations style..."
-              # 如果包含 proc_ops，原版脚本会替换为 proc_ops；由于 4.14 没有，我们这里确保它维持传统的 file_operations
+              # 4.14 内核无 proc_ops 结构体，保持默认的传统文件操作符逻辑即可
             fi
           fi
 
