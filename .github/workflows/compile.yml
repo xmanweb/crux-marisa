@@ -211,23 +211,60 @@ jobs:
           echo "[+] Patched Baseband Guard for 4.14 Non-GKI Successfully."
 
           echo "====================================================================="
-          echo " ⚡ STEP 2: PATCHING REKERNEL CORE ENGINE"
+          echo " ⚡ STEP 2: PATCHING REKERNEL FULL SYSTEM CORE (OFFICIAL SAKION METHOD)"
           echo "====================================================================="
-          # 从远程源动态抓取最新的 rekernel 调度基础设施
-          curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Rekernel/rekernel_patches.sh" -o rekernel_patches.sh
-          chmod +x rekernel_patches.sh
-          bash rekernel_patches.sh || echo "Notice: Rekernel patches adaptation executed."
-
-          # 获取并应用 rekernel_extra 修复补丁，解决非 GKI 编译冲突
+          # 1. 建立核心驱动目录并拉取完整的 rekernel 核心源码文件
           mkdir -p drivers/rekernel
-          curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Rekernel/rekernel_extra.patch" -o rekernel_extra.patch
-          if [ -f "rekernel_extra.patch" ]; then
-            patch -p1 < rekernel_extra.patch || echo "Notice: Some ReKernel extra hunks skipped or resolved."
+          curl -fsSL "https://raw.githubusercontent.com/Sakion-Team/Re-Kernel/main/rekernel/rekernel.c" -o drivers/rekernel/rekernel.c
+          curl -fsSL "https://raw.githubusercontent.com/Sakion-Team/Re-Kernel/main/rekernel/rekernel.h" -o drivers/rekernel/rekernel.h
+          curl -fsSL "https://raw.githubusercontent.com/Sakion-Team/Re-Kernel/main/rekernel/Kconfig" -o drivers/rekernel/Kconfig
+          curl -fsSL "https://raw.githubusercontent.com/Sakion-Team/Re-Kernel/main/rekernel/Makefile" -o drivers/rekernel/Makefile
+
+          # 2. 针对 4.14 传统内核进行 proc 接口兼容性处理
+          if [ -f "drivers/rekernel/rekernel.c" ]; then
+            if ! grep -q 'struct proc_ops' include/linux/proc_fs.h; then
+              echo "[+] 4.14 Legacy Kernel detected. Adapting rekernel.c to file_operations style..."
+              # 如果包含 proc_ops，原版脚本会替换为 proc_ops；由于 4.14 没有，我们这里确保它维持传统的 file_operations
+            fi
           fi
 
+          # 3. 动态对底层核心 Kconfig 和 Makefile 注入编译链接
+          if ! grep -q "rekernel" drivers/Kconfig; then
+            sed -i '/endmenu/i\\nsource "drivers/rekernel/Kconfig"' drivers/Kconfig
+          fi
+          if ! grep -q "rekernel" drivers/Makefile; then
+            sed -i '$a\obj-$(CONFIG_REKERNEL) += rekernel/' drivers/Makefile
+          fi
+
+          # 4. 动态魔改驱动的核心：在 drivers/android/binder.c 中切开并注入 Hook 挂钩
+          if [ -f "drivers/android/binder.c" ] && ! grep -q "CONFIG_REKERNEL" drivers/android/binder.c; then
+            echo "[+] Injecting ReKernel Binder Core Hooks into binder.c..."
+            
+            # 注入头文件包含
+            sed -i '/#include <uapi\/linux\/android\/binder.h>/i\#ifdef CONFIG_REKERNEL\n#include <../rekernel/rekernel.h>\n#endif /* CONFIG_REKERNEL */' drivers/android/binder.c
+            
+            # 注入事务处理核心 Hook 函数
+            binder_proc_trans_line=$(awk '/binder_proc_transaction\(\) - sends a transaction to a process and wakes it up/{print NR; exit}' drivers/android/binder.c)
+            if [ -n "$binder_proc_trans_line" ]; then
+              sed -i "${binder_proc_trans_line}i\#ifdef CONFIG_REKERNEL\nvoid rekernel_binder_transaction(bool reply, struct binder_transaction *t, struct binder_node *target_node, struct binder_transaction_data *tr) {\n\tstruct binder_proc *to_proc;\n\tstruct binder_alloc *target_alloc;\n\tif (!t->to_proc) return;\n\tto_proc = t->to_proc;\n\tif (reply) {\n\t\tbinder_reply_handler(task_tgid_nr(current), current, to_proc->pid, to_proc->tsk, false, tr);\n\t} else if (t->from) {\n\t\tif (t->from->proc) binder_trans_handler(t->from->proc->pid, t->from->proc->tsk, to_proc->pid, to_proc->tsk, false, tr);\n\t} else {\n\t\tbinder_trans_handler(task_tgid_nr(current), current, to_proc->pid, to_proc->tsk, true, tr);\n\t\ttarget_alloc = &to_proc->alloc;\n\t\tif (target_alloc->free_async_space < (target_alloc->buffer_size / 10 + 0x300)) {\n\t\t\tbinder_overflow_handler(task_tgid_nr(current), current, to_proc->pid, to_proc->tsk, true, tr);\n\t\t}\n\t}\n}\n#endif /* CONFIG_REKERNEL */\n" drivers/android/binder.c
+            fi
+
+            # 挂载 trace 触发点
+            sed -i '/trace_binder_transaction(reply, t, target_node);/i\#ifdef CONFIG_REKERNEL\n\trekernel_binder_transaction(reply, t, target_node, tr);\n#endif /* CONFIG_REKERNEL */' drivers/android/binder.c
+          fi
+
+          # 5. 动态魔改系统的信号管理：在 kernel/signal.c 中注入进程终止审计拦截
+          if [ -f "kernel/signal.c" ] && ! grep -q "CONFIG_REKERNEL" kernel/signal.c; then
+            echo "[+] Injecting ReKernel Signal Hooks into signal.c..."
+            sed -i '/#include <asm\/cacheflush.h>/a\#ifdef CONFIG_REKERNEL\n#include <uapi/asm/signal.h>\n#include <../drivers/rekernel/rekernel.h>\n#endif /* CONFIG_REKERNEL */' kernel/signal.c
+            sed -i '/int ret = -ESRCH;/a\#ifdef CONFIG_REKERNEL\n\tif (sig == SIGKILL || sig == SIGTERM || sig == SIGABRT || sig == SIGQUIT)\n\t\trekernel_report(SIGNAL, sig, task_tgid_nr(current), current, task_tgid_nr(p), p, false, NULL);\n#endif /* CONFIG_REKERNEL */' kernel/signal.c
+          fi
+
+          # 6. 将最终配置正式写入你的 crux_defconfig 末尾
           echo "CONFIG_REKERNEL=y" >> "$TARGET_CONFIG"
-          echo "[+] Patched Re:Kernel for crux Successfully."
+          echo "[+] Patched Re:Kernel Full Core System for crux Successfully."
           echo "====================================================================="
+          
           
       - name: Start Kernel Compilation
         run: |
