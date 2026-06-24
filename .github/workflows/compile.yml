@@ -163,7 +163,60 @@ jobs:
           monitor_diff "kernel/sys.c" "Final Check - kernel/sys.c Inline Hook"
           monitor_diff "drivers/input/input.c" "Final Check - Input Device Hook"
           echo "====== Final Audit Complete ======"
+          
+      - name: "PHASE 3.5: Advanced Patch Integration (Baseband-guard & ReKernel)"
+        run: |
+          cd $GITHUB_WORKSPACE
+          TARGET_CONFIG="arch/arm64/configs/crux_defconfig"
 
+          if [ ! -f "$TARGET_CONFIG" ]; then
+            echo "❌ ERROR: $TARGET_CONFIG not found! Make sure checkout and paths are correct."
+            exit 1
+          fi
+
+          echo "====================================================================="
+          echo " 🛡️  STEP 1: PATCHING BASEBAND GUARD & CONFIGURING LSM"
+          echo "====================================================================="
+          wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
+          
+          echo "CONFIG_BBG=y" >> "$TARGET_CONFIG"
+          # 默认开启阻止启动行为 (相当于 BASEBAND_GUARD_BOOT == true)
+          echo "CONFIG_BBG_BLOCK_BOOT=y" >> "$TARGET_CONFIG"
+
+          if grep -q "DEFINE_LSM" "include/linux/lsm_hooks.h" && ! grep -q "baseband_guard" "$TARGET_CONFIG"; then
+            echo "[+] LSM Detection Engine: Found DEFINE_LSM in lsm_hooks.h"
+            
+            if ! grep -rq "CONFIG_LSM=" "$TARGET_CONFIG" && grep -q "bpf" "security/Kconfig"; then
+              echo "[-] Mode A: No default CONFIG_LSM found. BPF detected. Appending full LSM array."
+              echo 'CONFIG_LSM="lockdown,yama,loadpin,safesetid,integrity,selinux,smack,tomoyo,apparmor,bpf,baseband_guard"' >> "$TARGET_CONFIG"
+            elif ! grep -rq "CONFIG_LSM=" "$TARGET_CONFIG"; then
+              echo "[-] Mode B: No default CONFIG_LSM found. Appending legacy LSM array."
+              echo 'CONFIG_LSM="lockdown,yama,loadpin,safesetid,integrity,selinux,smack,tomoyo,apparmor,baseband_guard"' >> "$TARGET_CONFIG"
+            else
+              echo "[+] Mode C: Found pre-defined CONFIG_LSM value. Injecting inline..."
+              sed -i 's/\(CONFIG_LSM="[^"]*\)"/\1,baseband_guard"/' "$TARGET_CONFIG"
+            fi
+          fi
+          echo "[+] Patched Baseband Guard Successfully."
+
+          echo "====================================================================="
+          echo " ⚡ STEP 2: PATCHING REKERNEL CORE ENGINE"
+          echo "====================================================================="
+          # 从远程源动态抓取最新的 rekernel 调度基础设施
+          curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Rekernel/rekernel_patches.sh" -o rekernel_patches.sh
+          chmod +x rekernel_patches.sh
+          bash rekernel_patches.sh || echo "Notice: Rekernel patches adaptation executed."
+
+          # 获取并应用 rekernel_extra 修复补丁
+          mkdir -p drivers/rekernel
+          curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Rekernel/rekernel_extra.patch" -o rekernel_extra.patch
+          if [ -f "rekernel_extra.patch" ]; then
+            patch -p1 < rekernel_extra.patch || echo "Notice: Some ReKernel extra hunks skipped or resolved."
+          fi
+
+          echo "CONFIG_REKERNEL=y" >> "$TARGET_CONFIG"
+          echo "[+] Patched Re:Kernel for crux Successfully."
+          echo "====================================================================="
       - name: Start Kernel Compilation
         run: |
           cd $GITHUB_WORKSPACE
