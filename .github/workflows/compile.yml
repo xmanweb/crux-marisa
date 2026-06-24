@@ -220,15 +220,21 @@ jobs:
           curl -fsSL "https://raw.githubusercontent.com/Sakion-Team/Re-Kernel/main/Integrate/rekernel/Kconfig" -o drivers/rekernel/Kconfig
           curl -fsSL "https://raw.githubusercontent.com/Sakion-Team/Re-Kernel/main/Integrate/rekernel/Makefile" -o drivers/rekernel/Makefile
 
-          # 2. 针对 4.14 传统内核进行 proc 接口兼容性处理
+          # 2. 【核心修正】解决与小米 Millet 基础设施的 frozen_task_group 命名冲突
+          if [ -f "drivers/rekernel/rekernel.h" ]; then
+            echo "[+] Fixing symbol conflicts with Xiaomi Millet (frozen_task_group)..."
+            sed -i 's/frozen_task_group/rekernel_frozen_task_group/g' drivers/rekernel/rekernel.h
+            sed -i 's/frozen_task_group/rekernel_frozen_task_group/g' drivers/rekernel/rekernel.c
+          fi
+
+          # 3. 针对 4.14 传统内核进行 proc 接口兼容性处理
           if [ -f "drivers/rekernel/rekernel.c" ]; then
             if ! grep -q 'struct proc_ops' include/linux/proc_fs.h; then
               echo "[+] 4.14 Legacy Kernel detected. Adapting rekernel.c to file_operations style..."
-              # 4.14 内核无 proc_ops 结构体，保持默认的传统文件操作符逻辑即可
             fi
           fi
 
-          # 3. 动态对底层核心 Kconfig 和 Makefile 注入编译链接
+          # 4. 动态对底层核心 Kconfig 和 Makefile 注入编译链接
           if ! grep -q "rekernel" drivers/Kconfig; then
             sed -i '/endmenu/i\\nsource "drivers/rekernel/Kconfig"' drivers/Kconfig
           fi
@@ -236,7 +242,7 @@ jobs:
             sed -i '$a\obj-$(CONFIG_REKERNEL) += rekernel/' drivers/Makefile
           fi
 
-          # 4. 动态魔改驱动的核心：在 drivers/android/binder.c 中切开并注入 Hook 挂钩
+          # 5. 动态魔改驱动的核心：在 drivers/android/binder.c 中切开并注入 Hook 挂钩
           if [ -f "drivers/android/binder.c" ] && ! grep -q "CONFIG_REKERNEL" drivers/android/binder.c; then
             echo "[+] Injecting ReKernel Binder Core Hooks into binder.c..."
             
@@ -253,14 +259,16 @@ jobs:
             sed -i '/trace_binder_transaction(reply, t, target_node);/i\#ifdef CONFIG_REKERNEL\n\trekernel_binder_transaction(reply, t, target_node, tr);\n#endif /* CONFIG_REKERNEL */' drivers/android/binder.c
           fi
 
-          # 5. 动态魔改系统的信号管理：在 kernel/signal.c 中注入进程终止审计拦截
+          # 6. 动态魔改系统的信号管理：在 kernel/signal.c 中注入进程终止审计拦截
           if [ -f "kernel/signal.c" ] && ! grep -q "CONFIG_REKERNEL" kernel/signal.c; then
             echo "[+] Injecting ReKernel Signal Hooks into signal.c..."
             sed -i '/#include <asm\/cacheflush.h>/a\#ifdef CONFIG_REKERNEL\n#include <uapi/asm/signal.h>\n#include <../drivers/rekernel/rekernel.h>\n#endif /* CONFIG_REKERNEL */' kernel/signal.c
+            
+            # 【注意】将代码放置在变量声明之后，规避 C99 -Wdeclaration-after-statement 警告/错误
             sed -i '/int ret = -ESRCH;/a\#ifdef CONFIG_REKERNEL\n\tif (sig == SIGKILL || sig == SIGTERM || sig == SIGABRT || sig == SIGQUIT)\n\t\trekernel_report(SIGNAL, sig, task_tgid_nr(current), current, task_tgid_nr(p), p, false, NULL);\n#endif /* CONFIG_REKERNEL */' kernel/signal.c
           fi
 
-          # 6. 将最终配置正式写入你的 crux_defconfig 末尾
+          # 7. 将最终配置正式写入你的 crux_defconfig 末尾
           echo "CONFIG_REKERNEL=y" >> "$TARGET_CONFIG"
           echo "[+] Patched Re:Kernel Full Core System for crux Successfully."
           echo "====================================================================="
