@@ -328,6 +328,21 @@ jobs:
 
           # 3.3 清理下载的临时补丁文件
           rm -f fix_kernel_panic_in_xt_qtaguid.cocci fix_restore_cgroup_file_prefix_handling.cocci
+
+          echo "====================================================================="
+          echo " 🩹 STEP 4: HOTFIXING NETPRIO CGROUP OLD-KERNEL ID CONFLICT"
+          echo "====================================================================="
+          NETPRIO_HEADER="include/net/netprio_cgroup.h"
+          if [ -f "$NETPRIO_HEADER" ]; then
+            echo "[+] Patching netprio_cgroup.h to bypass missing struct cgroup.id..."
+            sed -i 's/idx = css->cgroup->id;/idx = cgroup_id(css->cgroup);/g' "$NETPRIO_HEADER"
+            echo "---------------------------------------------------------------------"
+            grep -n "idx =" "$NETPRIO_HEADER" || true
+            echo "---------------------------------------------------------------------"
+          else
+            echo "[-] $NETPRIO_HEADER not found. Skipped."
+          fi
+
           echo "[+] Droidspaces and Docker Stack Integrated Cleanly via Dedicated Upstream."
           echo "====================================================================="
 
