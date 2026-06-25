@@ -333,14 +333,28 @@ jobs:
           echo " 🩹 STEP 4: HOTFIXING NETPRIO CGROUP OLD-KERNEL ID CONFLICT"
           echo "====================================================================="
           NETPRIO_HEADER="include/net/netprio_cgroup.h"
+          NETPRIO_SOURCE="net/core/netprio_cgroup.c"
+
+          # 1. 修补头文件
           if [ -f "$NETPRIO_HEADER" ]; then
             echo "[+] Patching netprio_cgroup.h to bypass missing struct cgroup.id..."
             sed -i 's/idx = css->cgroup->id;/idx = cgroup_id(css->cgroup);/g' "$NETPRIO_HEADER"
-            echo "---------------------------------------------------------------------"
-            grep -n "idx =" "$NETPRIO_HEADER" || true
-            echo "---------------------------------------------------------------------"
           else
             echo "[-] $NETPRIO_HEADER not found. Skipped."
+          fi
+
+          # 2. 修补源文件（处理这次报错的 4 处位置）
+          if [ -f "$NETPRIO_SOURCE" ]; then
+            echo "[+] Patching netprio_cgroup.c to bypass missing struct cgroup.id..."
+            # 替换 int id = css->cgroup->id; 以及 return css->cgroup->id; 等所有形式
+            sed -i 's/css->cgroup->id/cgroup_id(css->cgroup)/g' "$NETPRIO_SOURCE"
+            
+            # 打印修改后的关键行进行审计验证
+            echo "---------------------------------------------------------------------"
+            grep -n "cgroup_id" "$NETPRIO_SOURCE" || true
+            echo "---------------------------------------------------------------------"
+          else
+            echo "[-] $NETPRIO_SOURCE not found. Skipped."
           fi
 
           echo "[+] Droidspaces and Docker Stack Integrated Cleanly via Dedicated Upstream."
