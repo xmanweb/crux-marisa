@@ -38,22 +38,6 @@ jobs:
           mkdir -p zyc-clang
           tar -xzf Clang-16.0.6-20260510.tar.gz -C zyc-clang
 
-      - name: "PHASE 1.5: Intercept & Manually Rescue Failed Hunks (Script Driven)"
-        run: |
-          cd $GITHUB_WORKSPACE
-          
-          # 清理残留文件
-          find . -name "*.rej" -delete
-          find . -name "*.orig" -delete
-
-          # 执行本地修复脚本
-          if [ -f ".github/workflows/rescue_hunks.sh" ]; then
-            chmod +x .github/workflows/rescue_hunks.sh
-            ./.github/workflows/rescue_hunks.sh
-          else
-            echo "Notice: rescue_hunks.sh not found, skipping."
-          fi
-
       - name: "PHASE 2: Integrate Official ReSukiSU"
         run: |
           cd $GITHUB_WORKSPACE
@@ -72,8 +56,31 @@ jobs:
           fi
 
           if [ -f "fs/exec.c" ]; then
+            echo "Applying non-GKI resilient execve patches via explicit echo..."
+            # 1. 头部注入声明
             sed -i '1i #ifdef CONFIG_KSU_MANUAL_HOOK\n#include <linux/binfmts.h>\n__attribute__((hot)) extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n#endif' fs/exec.c
-            sed -i 's/retval = bprm_mm_init(bprm);/#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_execveat(\&fd, \&filename, \&argv, \&envp, \&flags);\n#endif\n\tretval = bprm_mm_init(bprm);/g' fs/exec.c
+            
+            # 2. 逐行 echo 构造补丁文件，严格规避缩进污染
+            rm -f fs_exec.patch
+            echo '--- a/fs/exec.c' >> fs_exec.patch
+            echo '+++ b/fs/exec.c' >> fs_exec.patch
+            echo '@@ -1645,4 +1645,7 @@ int search_binary_handler(struct linux_binprm *bprm)' >> fs_exec.patch
+            echo ' 	int retval;' >> fs_exec.patch
+            echo ' 	struct linux_binfmt *fmt;' >> fs_exec.patch
+            echo '+#ifdef CONFIG_KSU_MANUAL_HOOK' >> fs_exec.patch
+            echo '+	ksu_handle_execveat(NULL, &bprm->filename, NULL, NULL, NULL);' >> fs_exec.patch
+            echo '+#endif' >> fs_exec.patch
+            echo ' 	pid_t old_tgid = current->tgid;' >> fs_exec.patch
+            echo ' 	pid_t old_vpid = task_pid_nr_ns(current, task_active_pid_ns(current));' >> fs_exec.patch
+            
+            # 3. 尝试打入补丁，若失败则用 sed 强行兜底
+            if ! patch -p1 < fs_exec.patch; then
+              echo "Standard patch missed, falling back to safe sed injection..."
+              sed -i 's/int search_binary_handler(struct linux_binprm \*bprm)/int search_binary_handler(struct linux_binprm *bprm) {\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_execveat(NULL, \&bprm->filename, NULL, NULL, NULL);\n#endif/g' fs/exec.c
+              # 消除可能重复引入的花括号
+              sed -i 's/int search_binary_handler(struct linux_binprm \*bprm) {\n{\n/int search_binary_handler(struct linux_binprm *bprm) {\n/g' fs/exec.c
+            fi
+            rm -f fs_exec.patch
           fi
 
           if [ -f "fs/open.c" ]; then
