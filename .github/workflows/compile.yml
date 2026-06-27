@@ -56,31 +56,49 @@ jobs:
           fi
 
           if [ -f "fs/exec.c" ]; then
-            echo "Applying non-GKI resilient execve patches via explicit echo..."
-            # 1. 头部注入声明
+            echo "Applying official alignment patches for fs/exec.c..."
+            
+            # 1. 在文件头部注入 ReSukiSU 函数声明
             sed -i '1i #ifdef CONFIG_KSU_MANUAL_HOOK\n#include <linux/binfmts.h>\n__attribute__((hot)) extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n#endif' fs/exec.c
             
-            # 2. 逐行 echo 构造补丁文件，严格规避缩进污染
-            rm -f fs_exec.patch
-            echo '--- a/fs/exec.c' >> fs_exec.patch
-            echo '+++ b/fs/exec.c' >> fs_exec.patch
-            echo '@@ -1645,4 +1645,7 @@ int search_binary_handler(struct linux_binprm *bprm)' >> fs_exec.patch
-            echo ' 	int retval;' >> fs_exec.patch
-            echo ' 	struct linux_binfmt *fmt;' >> fs_exec.patch
-            echo '+#ifdef CONFIG_KSU_MANUAL_HOOK' >> fs_exec.patch
-            echo '+	ksu_handle_execveat(NULL, &bprm->filename, NULL, NULL, NULL);' >> fs_exec.patch
-            echo '+#endif' >> fs_exec.patch
-            echo ' 	pid_t old_tgid = current->tgid;' >> fs_exec.patch
-            echo ' 	pid_t old_vpid = task_pid_nr_ns(current, task_active_pid_ns(current));' >> fs_exec.patch
-            
-            # 3. 尝试打入补丁，若失败则用 sed 强行兜底
-            if ! patch -p1 < fs_exec.patch; then
-              echo "Standard patch missed, falling back to safe sed injection..."
-              sed -i 's/int search_binary_handler(struct linux_binprm \*bprm)/int search_binary_handler(struct linux_binprm *bprm) {\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_execveat(NULL, \&bprm->filename, NULL, NULL, NULL);\n#endif/g' fs/exec.c
-              # 消除可能重复引入的花括号
-              sed -i 's/int search_binary_handler(struct linux_binprm \*bprm) {\n{\n/int search_binary_handler(struct linux_binprm *bprm) {\n/g' fs/exec.c
+            # 2. 逐行 echo 构造绝对纯净的精准 Patch
+            rm -f fs_exec_official.patch
+            echo '--- a/fs/exec.c' >> fs_exec_official.patch
+            echo '+++ b/fs/exec.c' >> fs_exec_official.patch
+            echo '@@ -20,4 +20,7 @@ int do_execve(struct filename *filename,' >> fs_exec_official.patch
+            echo ' 	struct user_arg_ptr argv = { .ptr.native = __argv };' >> fs_exec_official.patch
+            echo ' 	struct user_arg_ptr envp = { .ptr.native = __envp };' >> fs_exec_official.patch
+            echo '+#ifdef CONFIG_KSU_MANUAL_HOOK' >> fs_exec_official.patch
+            echo '+	ksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);' >> fs_exec_official.patch
+            echo '+#endif' >> fs_exec_official.patch
+            echo ' 	return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);' >> fs_exec_official.patch
+            echo ' }' >> fs_exec_official.patch
+            echo '@@ -30,4 +33,7 @@ static int compat_do_execve(struct filename *filename,' >> fs_exec_official.patch
+            echo ' 		.is_compat = true,' >> fs_exec_official.patch
+            echo ' 		.ptr.compat = __envp,' >> fs_exec_official.patch
+            echo ' 	};' >> fs_exec_official.patch
+            echo '+#ifdef CONFIG_KSU_MANUAL_HOOK' >> fs_exec_official.patch
+            echo '+	ksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);' >> fs_exec_official.patch
+            echo '+#endif' >> fs_exec_official.patch
+            echo ' 	return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);' >> fs_exec_official.patch
+            echo ' }' >> fs_exec_official.patch
+
+            # 3. 尝试打入补丁，如果因为微调错位则用 sed 强行兜底
+            if ! patch -p1 < fs_exec_official.patch; then
+              echo "Patch tool missed slightly, deploying regular expressions for 100% precision..."
+              
+              # 给 do_execve 注入
+              sed -i '/int do_execve(struct filename \*filename,/,/return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);/{
+                /return do_execveat_common/i #ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_execveat((int *)AT_FDCWD, \&filename, \&argv, \&envp, 0);\n#endif
+              }' fs/exec.c
+
+              # 给 compat_do_execve 注入
+              sed -i '/static int compat_do_execve(struct filename \*filename,/,/return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);/{
+                /return do_execveat_common/i #ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_execveat((int *)AT_FDCWD, \&filename, \&argv, \&envp, 0);\n#endif
+              }' fs/exec.c
             fi
-            rm -f fs_exec.patch
+            
+            rm -f fs_exec_official.patch
           fi
 
           if [ -f "fs/open.c" ]; then
