@@ -179,19 +179,19 @@ jobs:
           echo "====================================================================="
           
           # 【精准欺骗】将 #define DEFINE_LSM(lsm) 临时替换掉，强迫官方脚本识别为老内核并走源码 Patch 路线
-          if [ -f "include/linux/lsm_hooks.h" ]; then
-            echo "[+] Patching lsm_hooks.h to bypass misdetection..."
-            sed -i 's/#define DEFINE_LSM(lsm)/#define FAKE_DEFINE_LSM(lsm)/g' include/linux/lsm_hooks.h
-          fi
+          # if [ -f "include/linux/lsm_hooks.h" ]; then
+          #   echo "[+] Patching lsm_hooks.h to bypass misdetection..."
+          #   sed -i 's/#define DEFINE_LSM(lsm)/#define FAKE_DEFINE_LSM(lsm)/g' include/linux/lsm_hooks.h
+          # fi
 
           # 执行官方设置脚本（此时它会正确识别并打印 "Modern LSM infrastructure not detected... Applying Selinux patch..."）
           wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
           
           # 【完美恢复】恢复原本的宏定义，确保内核后续的正常编译
-          if [ -f "include/linux/lsm_hooks.h" ]; then
-            echo "[+] Restoring lsm_hooks.h structural definition..."
-            sed -i 's/#define FAKE_DEFINE_LSM(lsm)/#define DEFINE_LSM(lsm)/g' include/linux/lsm_hooks.h
-          fi
+          # if [ -f "include/linux/lsm_hooks.h" ]; then
+          #   echo "[+] Restoring lsm_hooks.h structural definition..."
+          #   sed -i 's/#define FAKE_DEFINE_LSM(lsm)/#define DEFINE_LSM(lsm)/g' include/linux/lsm_hooks.h
+          # fi
 
           # 将配置注入到你的 crux_defconfig 末尾
           echo "CONFIG_BBG=y" >> "$TARGET_CONFIG"
@@ -375,16 +375,6 @@ jobs:
           ./scripts/config --file out/.config \
               -e KSU \
               -e THREAD_INFO_IN_TASK \
-              -e KSU_SUSFS \
-              -e KSU_SUSFS_SUS_PATH \
-              -e KSU_SUSFS_SUS_MOUNT \
-              -e KSU_SUSFS_SUS_KSTAT \
-              -e KSU_SUSFS_SPOOF_UNAME \
-              -e KSU_SUSFS_ENABLE_LOG \
-              -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
-              -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
-              -e KSU_SUSFS_OPEN_REDIRECT \
-              -e KSU_SUSFS_SUS_MAP \
               -e KSU_MULTI_MANAGER_SUPPORT \
               -e BUILD_ARM64_DT_OVERLAY
 
