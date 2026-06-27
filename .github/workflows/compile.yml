@@ -374,7 +374,7 @@ jobs:
           
           ./scripts/config --file out/.config \
               -e KSU \
-              -e KSU_MANUAL_HOOK
+              -e KSU_MANUAL_HOOK \
               -e THREAD_INFO_IN_TASK \
               -e KSU_MULTI_MANAGER_SUPPORT \
               -e BUILD_ARM64_DT_OVERLAY
