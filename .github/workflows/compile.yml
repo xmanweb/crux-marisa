@@ -61,11 +61,6 @@ jobs:
           mkdir -p zyc-clang
           tar -xzf Clang-16.0.6-20260510.tar.gz -C zyc-clang
 
-        # ==========================================
-        # 条件分支：ReSukiSU 类型选择
-        # ==========================================
-        
-        # 分支 A: Inline Hook + SUSFS
       - name: "PHASE 1: Apply SUSFS 4.14 Baseline Patch"
         if: env.HOOK_TYPE == 'inline_susfs'
         run: |
@@ -101,7 +96,6 @@ jobs:
           chmod +x susfs_inline_hook_patches.sh
           bash susfs_inline_hook_patches.sh || echo "Notice: VFS tree adaptation finished."
 
-      # 分支 B: Manual Hook
       - name: "PHASE 3: Inject ReSukiSU Manual Hooks via Remote Trusted Script"
         if: env.HOOK_TYPE == 'manual_hook'
         run: |
@@ -119,56 +113,42 @@ jobs:
             echo "❌ CRITICAL ERROR: Failed to download syscall_hook_patches.sh!" && exit 1
           fi
 
-      # ==========================================
-      # 可选模块一: Baseband Guard & ReKernel
-      # ==========================================
-      - name: "PHASE 3.5: Advanced Patch Integration (Baseband-guard & ReKernel)"
+      - name: "PHASE 4-1: Advanced Patch Integration Baseband-guard"
+        if: env.ENABLE_BBG == 'true'
         run: |
           cd $GITHUB_WORKSPACE
           TARGET_CONFIG="arch/arm64/configs/crux_defconfig"
           if [ ! -f "$TARGET_CONFIG" ]; then
             echo "❌ ERROR: $TARGET_CONFIG not found!" && exit 1
           fi
-
-          # 1. Baseband Guard
-          if [ "${{ env.ENABLE_BBG }}" = "true" ]; then
-            echo "====================================================================="
-            echo " 🛡️  STEP 1: PATCHING BASEBAND GUARD"
-            echo "====================================================================="
-            wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
-            if grep -q "config LSM" security/Kconfig; then
-              sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
-            fi
-            echo "CONFIG_BBG=y" >> "$TARGET_CONFIG"
-            echo "[+] Patched Baseband Guard Successfully."
-          else
-            echo "[-] Baseband Guard disabled. Skipping."
+          wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
+          if grep -q "config LSM" security/Kconfig; then
+            sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
           fi
+          echo "CONFIG_BBG=y" >> "$TARGET_CONFIG"
+          echo "[+] Patched Baseband Guard Successfully."
+      
+      - name: "PHASE 4-2: Advanced Patch Integration Re-kernel"
+        if: env.ENABLE_REKERNEL == 'true'
+        run: |
+          cd $GITHUB_WORKSPACE
+          TARGET_CONFIG="arch/arm64/configs/crux_defconfig"
+          if [ ! -f "$TARGET_CONFIG" ]; then
+            echo "❌ ERROR: $TARGET_CONFIG not found!" && exit 1
+          fi         
+          curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Rekernel/rekernel_patches.sh" -o rekernel_patches.sh
+          chmod +x rekernel_patches.sh
+          bash rekernel_patches.sh || echo "Notice: Rekernel patches adaptation executed."
 
-          # 2. ReKernel
-          if [ "${{ env.ENABLE_REKERNEL }}" = "true" ]; then
-            echo "====================================================================="
-            echo " ⚡ STEP 2: PATCHING REKERNEL CORE ENGINE"
-            echo "====================================================================="
-            curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Rekernel/rekernel_patches.sh" -o rekernel_patches.sh
-            chmod +x rekernel_patches.sh
-            bash rekernel_patches.sh || echo "Notice: Rekernel patches adaptation executed."
-
-            mkdir -p drivers/rekernel
-            curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Rekernel/rekernel_extra.patch" -o rekernel_extra.patch
-            if [ -f "rekernel_extra.patch" ]; then
-              patch -p1 < rekernel_extra.patch || echo "Notice: Some ReKernel extra hunks skipped or resolved."
-            fi
-            echo "CONFIG_REKERNEL=y" >> "$TARGET_CONFIG"
-            echo "[+] Patched Re:Kernel Successfully."
-          else
-            echo "[-] ReKernel disabled. Skipping."
+          mkdir -p drivers/net/rekernel/
+          curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Rekernel/rekernel_extra.patch" -o rekernel_extra.patch
+          if [ -f "rekernel_extra.patch" ]; then
+            patch -p1 < rekernel_extra.patch || echo "Notice: Some ReKernel extra hunks skipped or resolved."
           fi
+          echo "CONFIG_REKERNEL=y" >> "$TARGET_CONFIG"
+          echo "[+] Patched Re:Kernel Successfully."
 
-      # ==========================================
-      # 可选模块二: Droidspaces
-      # ==========================================
-      - name: "PHASE 3.7: Integrate Droidspaces & Docker Container Infrastructure"
+      - name: "PHASE 4-3: Advanced Patch Integrate Droidspaces & Docker Container Infrastructure"
         if: env.ENABLE_DROIDSPACES == 'true'
         run: |
           cd $GITHUB_WORKSPACE
@@ -223,9 +203,6 @@ jobs:
           if [ -f "$NETPRIO_HEADER" ]; then sed -i 's/idx = css->cgroup->id;/idx = cgroup_id(css->cgroup);/g' "$NETPRIO_HEADER"; fi
           if [ -f "$NETPRIO_SOURCE" ]; then sed -i 's/css->cgroup->id/cgroup_id(css->cgroup)/g' "$NETPRIO_SOURCE"; fi
 
-      # ==========================================
-      # 编译阶段
-      # ==========================================
       - name: Start Kernel Compilation
         run: |
           cd $GITHUB_WORKSPACE
@@ -285,9 +262,6 @@ jobs:
                       OBJDUMP=llvm-objdump \
                       STRIP=llvm-strip
 
-      # ==========================================
-      # 动态命名打包阶段
-      # ==========================================
       - name: Pack Kernel with AnyKernel3 (Dynamic Variable Naming)
         run: |
           cd $GITHUB_WORKSPACE
@@ -342,9 +316,6 @@ jobs:
           cd ak3_with_dtb && zip -r ../${ZIP_FULL} * && cd ..
           cd ak3_no_dtb && zip -r ../${ZIP_NODTB} * && cd ..
 
-      # ==========================================
-      # 上传阶段
-      # ==========================================
       - name: Upload Both Kernel Zips
         uses: actions/upload-artifact@v4
         with:
