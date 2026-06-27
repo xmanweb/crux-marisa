@@ -61,12 +61,12 @@ jobs:
           mkdir -p zyc-clang
           tar -xzf Clang-16.0.6-20260510.tar.gz -C zyc-clang
 
-      # ==========================================
-      # 条件分支：ReSukiSU 类型选择
-      # ==========================================
-      
-      # 分支 A: Inline Hook + SUSFS
-       bondage - name: "PHASE 1: Apply SUSFS 4.14 Baseline Patch"
+        # ==========================================
+        # 条件分支：ReSukiSU 类型选择
+        # ==========================================
+        
+        # 分支 A: Inline Hook + SUSFS
+      - name: "PHASE 1: Apply SUSFS 4.14 Baseline Patch"
         if: env.HOOK_TYPE == 'inline_susfs'
         run: |
           cd $GITHUB_WORKSPACE
