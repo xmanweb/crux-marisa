@@ -168,35 +168,66 @@ if [ -f "$TASK_MMU_FILE" ]; then
 fi
 
 # ---------------------------------------------------------------------
-# 4. 修复 fs/namei.c (精准控制 do_o_path 与 path_openat)
+# 4. 修复 fs/namei.c (严格仅对齐 do_tmpfile 遗漏的 putname)
 # ---------------------------------------------------------------------
 NAMEI_FILE="fs/namei.c"
 if [ -f "$NAMEI_FILE" ]; then
     echo "[+] Patching $NAMEI_FILE..."
-    
     awk '
     BEGIN { 
+        in_do_tmpfile = 0;
+        tmpfile_out_injected = 0;
+
         in_do_o_path = 0; 
+        do_o_path_var_added = 0;
         do_o_path_body_injected = 0;
+        do_o_path_exit_injected = 0;
+
         in_path_openat = 0; 
+        path_openat_var_added = 0;
     }
 
-    /static int do_o_path\(struct nameidata \*nd, unsigned flags, struct file \*file\)/ {
+    /* === 1. do_tmpfile：仅补全末尾 path_put(&path) 后的 putname === */
+    /static int do_tmpfile\(struct nameidata \*nd,/ {
+        in_do_tmpfile = 1
+        print $0
+        next
+    }
+
+    in_do_tmpfile && /path_put\(&path\);/ && !tmpfile_out_injected {
+        print $0
+        print "#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT"
+        print "\tif (fake_filename && !IS_ERR(fake_filename))"
+        print "\t\tputname(fake_filename);"
+        print "#endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT"
+        tmpfile_out_injected = 1
+        next
+    }
+
+    in_do_tmpfile && tmpfile_out_injected && /return error;/ {
+        print $0
+        in_do_tmpfile = 0
+        next
+    }
+
+    /* === 2. do_o_path === */
+    /static int do_o_path\(struct nameidata \*nd,/ {
         in_do_o_path = 1
         print $0
         next
     }
 
-    in_do_o_path && /struct path path;/ {
+    in_do_o_path && /struct path path;/ && !do_o_path_var_added {
         print "#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT"
         print "\tint old_dfd = nd->dfd;"
         print "\tstruct filename *fake_filename = NULL;"
-        print "#endif"
+        print "#endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT"
         print $0
+        do_o_path_var_added = 1
         next
     }
 
-    in_do_o_path && /if \(!error\) \{/ {
+    in_do_o_path && /if \(!error\) \{/ && !do_o_path_body_injected {
         print $0
         print "#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT"
         print "\t\tif (old_dfd != -1 &&"
@@ -214,34 +245,36 @@ if [ -f "$NAMEI_FILE" ]; then
         print "\t\t\t\t}"
         print "\t\t\t}"
         print "\t\t}"
-        print "#endif"
+        print "#endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT"
         do_o_path_body_injected = 1
         next
     }
 
-    in_do_o_path && do_o_path_body_injected && /return error;/ {
+    in_do_o_path && do_o_path_body_injected && /return error;/ && !do_o_path_exit_injected {
         print "#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT"
         print "\tif (fake_filename && !IS_ERR(fake_filename))"
         print "\t\tputname(fake_filename);"
-        print "#endif"
+        print "#endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT"
         print $0
+        do_o_path_exit_injected = 1
         in_do_o_path = 0
-        do_o_path_body_injected = 0
         next
     }
 
+    /* === 3. path_openat === */
     /static struct file \*path_openat\(struct nameidata \*nd,/ {
         in_path_openat = 1
         print $0
         next
     }
 
-    in_path_openat && /const char \*s;/ {
+    in_path_openat && /const char \*s;/ && !path_openat_var_added {
         print "#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT"
         print "\tint old_dfd = nd->dfd;"
         print "\tstruct filename *fake_filename = NULL;"
-        print "#endif"
+        print "#endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT"
         print $0
+        path_openat_var_added = 1
         in_path_openat = 0
         next
     }
