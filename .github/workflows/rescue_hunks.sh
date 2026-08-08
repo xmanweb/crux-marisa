@@ -1,25 +1,24 @@
 #!/bin/bash
 # =====================================================================
-# 🚀 SusFS 2.1.0 Total Patch Fixer (ASCII Escape-Safe Edition)
-# 场景：GitHub Actions 自动化流水线 (全量、零污染、纯 BASH + AWK)
-# 特性：全面采用 ASCII 码及双引号替换脆弱的单引号转义，彻底解决编译阻断
+# 🚀 SusFS Rescue Engine (Fully Aligned Edition)
+# 场景：GitHub Actions 自动化流水线
+# 特性：严格匹配源码结构，补齐 fs/namei.c 及 fs/namespace.c 的真实逻辑
 # =====================================================================
 
 set -e
 
-echo "🚀 [SusFS Rescue Engine] Starting ASCII safe dual-function rewrite..."
+echo "🚀 [SusFS Rescue Engine] Running full-alignment patcher..."
 
 # ---------------------------------------------------------------------
-# 1. 修复 fs/namespace.c (解决 3 处 Hunk FAILED，适配新版 IDA API)
+# 1. 修复 fs/namespace.c (功能对齐 ida_alloc_min API)
 # ---------------------------------------------------------------------
 NAMESPACE_FILE="fs/namespace.c"
 if [ -f "$NAMESPACE_FILE" ]; then
-    echo "[+] Patching $NAMESPACE_FILE (Reconciling ID management with standard IDA API)..."
+    echo "[+] Patching $NAMESPACE_FILE..."
     
     awk '
     BEGIN { patched_free = 0; patched_alloc = 0; }
 
-    # 全量拦截并重写 mnt_free_id 块
     /static void mnt_free_id\(struct mount \*mnt\)/, /^}/ {
         if (!patched_free) {
             print "static void mnt_free_id(struct mount *mnt)"
@@ -36,7 +35,6 @@ if [ -f "$NAMESPACE_FILE" ]; then
         next
     }
 
-    # 全量拦截并重写 mnt_alloc_group_id 块
     /static int mnt_alloc_group_id\(struct mount \*mnt\)/, /^}/ {
         if (!patched_alloc) {
             print "static int mnt_alloc_group_id(struct mount *mnt)"
@@ -69,19 +67,15 @@ if [ -f "$NAMESPACE_FILE" ]; then
 fi
 
 # ---------------------------------------------------------------------
-# 2. 修复 fs/proc/cmdline.c (根据指定特性精准重构注入)
+# 2. 修复 fs/proc/cmdline.c
 # ---------------------------------------------------------------------
 CMDLINE_FILE="fs/proc/cmdline.c"
 if [ -f "$CMDLINE_FILE" ]; then
-    echo "[+] Patching $CMDLINE_FILE (Applying target static_branch cmdline hook)..."
+    echo "[+] Patching $CMDLINE_FILE..."
     
     awk '
-    BEGIN { 
-        header_added = 0; 
-        in_cmdline_show = 0;
-    }
+    BEGIN { header_added = 0; in_cmdline_show = 0; }
 
-    # 1. 匹配到目标函数入口，激活状态机，并在其上方注入指定的 extern 变量与函数声明
     /static int cmdline_proc_show/ {
         if (!header_added) {
             print "#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG"
@@ -94,9 +88,8 @@ if [ -f "$CMDLINE_FILE" ]; then
         in_cmdline_show = 1
     }
 
-    # 2. 在函数体内，精准赶在第一个 #ifdef CONFIG_INITRAMFS_IGNORE_SKIP_FLAG 前下网
-    /#ifdef CONFIG_INITRAMFS_IGNORE_SKIP_FLAG/ {
-        if (in_cmdline_show == 1) {
+    /seq_printf\(m, "%s\\n", saved_command_line\);/ {
+        if (in_cmdline_show) {
             print "#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG"
             print "\tif (static_branch_likely(&susfs_is_fake_cmdline_or_bootconfig_buffer_set)) {"
             print "\t\tsusfs_spoof_cmdline_or_bootconfig(m);"
@@ -104,175 +97,33 @@ if [ -f "$CMDLINE_FILE" ]; then
             print "\t\treturn 0;"
             print "\t}"
             print "#endif"
-            in_cmdline_show = 0  # 核心逻辑注入完毕，立刻关闭状态机
+            in_cmdline_show = 0
         }
     }
 
-    /^}/ {
-        in_cmdline_show = 0
-    }
+    /^}/ { in_cmdline_show = 0 }
 
     { print }
     ' "$CMDLINE_FILE" > "${CMDLINE_FILE}.tmp" && mv "${CMDLINE_FILE}.tmp" "$CMDLINE_FILE"
 fi
 
 # ---------------------------------------------------------------------
-# 3. 修复 fs/proc/task_mmu.c (对 show_smap 与 show_smaps_rollup 全量重写，安全转义)
+# 3. 修复 fs/proc/task_mmu.c
 # ---------------------------------------------------------------------
 TASK_MMU_FILE="fs/proc/task_mmu.c"
 if [ -f "$TASK_MMU_FILE" ]; then
-    echo "[+] Patching $TASK_MMU_FILE (Injecting clear ASCII rewritten show_smap and rollup)..."
+    echo "[+] Patching $TASK_MMU_FILE..."
     
     awk '
-    BEGIN { 
-        header_added = 0; 
-        rewrite_smap = 0; 
-        rewrite_rollup = 0;
-    }
+    BEGIN { header_added = 0; }
 
-    # 头文件注入
     /#include <linux\/ctype\.h>/ && !header_added {
         print $0
         print "#if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)"
         print "#include <linux/susfs_def.h>"
-        print "#endif"
+        print "#endif // #if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)"
         header_added = 1
         next
-    }
-
-    # 拦截并重写第一个目标函数：show_smap
-    /static int show_smap\(struct seq_file \*m, void \*v\)/, /^}/ {
-        if (!rewrite_smap) {
-            print "static int show_smap(struct seq_file *m, void *v)"
-            print "{"
-            print "\tstruct vm_area_struct *vma = v;"
-            print "\tstruct mem_size_stats mss;"
-            print ""
-            print "\tmemset(&mss, 0, sizeof(mss));"
-            print ""
-            print "#ifdef CONFIG_KSU_SUSFS_SUS_MAP"
-            print "\tif (vma->vm_file) {"
-            print "\t\tstruct inode *inode = file_inode(vma->vm_file);"
-            print "\t\tif (SUSFS_IS_INODE_SUS_MAP(inode)) {"
-            print "\t\t\tshow_map_vma(m, vma);"
-            print "\t\t\tSEQ_PUT_DEC(\"Size:           \", vma->vm_end - vma->vm_start);"
-            print "\t\t\tSEQ_PUT_DEC(\" kB\\nKernelPageSize: \", vma_kernel_pagesize(vma));"
-            print "\t\t\tSEQ_PUT_DEC(\" kB\\nMMUPageSize:    \", vma_mmu_pagesize(vma));"
-            print "\t\t\tseq_puts(m, \" kB\\n\");"
-            print "\t\t\t__show_smap(m, &mss, false);"
-            print "\t\t\tif (arch_pkeys_enabled())"
-            print "\t\t\t\t\tseq_printf(m, \"ProtectionKey:  %8u\\n\", vma_pkey(vma));"
-            print "\t\t\tseq_puts(m, \"VmFlags: mr mw me\");"
-            print "\t\t\tseq_putc(m, 10);" # 彻底解决多字节常量警告
-            print "\t\t\tgoto bypass_orig_flow;"
-            print "\t\t}"
-            print "\t}"
-            print "#endif"
-            print ""
-            print "\tsmap_gather_stats(vma, &mss);"
-            print ""
-            print "\tshow_map_vma(m, vma);"
-            print "\tif (vma_get_anon_name(vma)) {"
-            print "\t\tseq_puts(m, \"Name:           \");"
-            print "\t\tseq_print_vma_name(m, vma);"
-            print "\t\tseq_putc(m, 10);" # 彻底解决多字节常量警告
-            print "\t}"
-            print ""
-            print "\tSEQ_PUT_DEC(\"Size:           \", vma->vm_end - vma->vm_start);"
-            print "\tSEQ_PUT_DEC(\" kB\\nKernelPageSize: \", vma_kernel_pagesize(vma));"
-            print "\tSEQ_PUT_DEC(\" kB\\nMMUPageSize:    \", vma_mmu_pagesize(vma));"
-            print "\tseq_puts(m, \" kB\\n\");"
-            print ""
-            print "\t__show_smap(m, &mss, false);"
-            print ""
-            print "\tif (arch_pkeys_enabled())"
-            print "\t\tseq_printf(m, \"ProtectionKey:  %8u\\n\", vma_pkey(vma));"
-            print "\tshow_smap_vma_flags(m, vma);"
-            print ""
-            print "#ifdef CONFIG_KSU_SUSFS_SUS_MAP"
-            print "bypass_orig_flow:"
-            print "#endif"
-            print "\tm_cache_vma(m, vma);"
-            print ""
-            print "\treturn 0;"
-            print "}"
-            rewrite_smap = 1
-        }
-        next
-    }
-
-    # 拦截并重写第二个目标函数：show_smaps_rollup
-    /static int show_smaps_rollup\(struct seq_file \*m, void \*v\)/, /^}/ {
-        if (!rewrite_rollup) {
-            print "static int show_smaps_rollup(struct seq_file *m, void *v)"
-            print "{"
-            print "\tstruct proc_maps_private *priv = m->private;"
-            print "\tstruct mem_size_stats mss;"
-            print "\tstruct mm_struct *mm;"
-            print "\tstruct vm_area_struct *vma;"
-            print "\tunsigned long last_vma_end = 0;"
-            print "\tint ret = 0;"
-            print ""
-            print "\tpriv->task = get_proc_task(priv->inode);"
-            print "\tif (!priv->task)"
-            print "\t\treturn -ESRCH;"
-            print ""
-            print "\tmm = priv->mm;"
-            print "\tif (!mm || !mmget_not_zero(mm)) {"
-            print "\t\tret = -ESRCH;"
-            print "\t\tgoto out_put_task;"
-            print "\t}"
-            print ""
-            print "\tmemset(&mss, 0, sizeof(mss));"
-            print ""
-            print "\tdown_read(&mm->mmap_sem);"
-            print "\thold_task_mempolicy(priv);"
-            print ""
-            print "\tfor (vma = priv->mm->mmap; vma; vma = vma->vm_next) {"
-            print "#ifdef CONFIG_KSU_SUSFS_SUS_MAP"
-            print "\t\tif (vma->vm_file) {"
-            print "\t\t\tstruct inode *inode = file_inode(vma->vm_file);"
-            print "\t\t\tif (SUSFS_IS_INODE_SUS_MAP(inode)) {"
-            print "\t\t\t\tmemset(&mss, 0, sizeof(mss));"
-            print "\t\t\t\tgoto bypass_orig_flow;"
-            print "\t\t\t}"
-            print "\t\t}"
-            print "#endif"
-            print "\t\tsmap_gather_stats(vma, &mss);"
-            print "#ifdef CONFIG_KSU_SUSFS_SUS_MAP"
-            print "bypass_orig_flow:"
-            print "#endif"
-            print "\t\tlast_vma_end = vma->vm_end;"
-            print "\t}"
-            print ""
-            print "\tshow_vma_header_prefix(m, priv->mm->mmap->vm_start,"
-            print "\t\t\t       last_vma_end, 0, 0, 0, 0);"
-            print "\tseq_pad(m, 32);" # 使用 ASCII 码 32 代替空格单引号，彻底解决编译错误
-            print "\tseq_puts(m, \"[rollup]\\n\");"
-            print ""
-            print "\t__show_smap(m, &mss, true);"
-            print ""
-            print "\trelease_task_mempolicy(priv);"
-            print "\tup_read(&mm->mmap_sem);"
-            print "\tmmput(mm);"
-            print ""
-            print "out_put_task:"
-            print "\tput_task_struct(priv->task);"
-            print "\tpriv->task = NULL;"
-            print ""
-            print "\treturn ret;"
-            print "}"
-            rewrite_rollup = 1
-        }
-        next
-    }
-
-    # 保持对 open_redirect 补丁的潜在相容性
-    /extern int susfs_open_redirect_spoof_show_map_vma/ {
-        sub(/char \*spoofed_name/, "char **spoofed_name")
-    }
-    /susfs_open_redirect_spoof_show_map_vma\(inode, &ino, &dev, spoofed_redirected_name\)/ {
-        sub(/spoofed_redirected_name/, "\\&spoofed_redirected_name")
     }
 
     { print }
@@ -280,19 +131,94 @@ if [ -f "$TASK_MMU_FILE" ]; then
 fi
 
 # ---------------------------------------------------------------------
-# 4. 修复 kernel/sys.c (精准对接：在 newuname 内的 memcpy 下方插桩)
+# 4. 修复 fs/namei.c (精确匹配 do_o_path 与 path_openat)
+# ---------------------------------------------------------------------
+NAMEI_FILE="fs/namei.c"
+if [ -f "$NAMEI_FILE" ]; then
+    echo "[+] Patching $NAMEI_FILE..."
+    
+    awk '
+    BEGIN { in_do_o_path = 0; in_path_openat = 0; }
+
+    /* 匹配 do_o_path 开头 */
+    /static int do_o_path\(struct nameidata \*nd, unsigned flags, struct file \*file\)/ {
+        in_do_o_path = 1
+        print $0
+        next
+    }
+
+    in_do_o_path && /struct path path;/ {
+        print "#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT"
+        print "\tint old_dfd = nd->dfd;"
+        print "\tstruct filename *fake_filename = NULL;"
+        print "#endif"
+        print $0
+        next
+    }
+
+    in_do_o_path && /if \(!error\) \{/ {
+        print $0
+        print "#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT"
+        print "\t\tif (old_dfd != -1 &&"
+        print "\t\t\tSUSFS_IS_INODE_OPEN_REDIRECT_WITHOUT_UID_CHECK(path.dentry->d_inode))"
+        print "\t\t{"
+        print "\t\t\tfake_filename = susfs_open_redirect_spoof_do_sys_openat(path.dentry->d_inode);"
+        print "\t\t\tif (fake_filename && !IS_ERR(fake_filename)) {"
+        print "\t\t\t\tpath_put(&path);"
+        print "\t\t\t\trestore_nameidata();"
+        print "\t\t\t\tset_nameidata(nd, old_dfd, fake_filename);"
+        print "\t\t\t\terror = path_lookupat(nd, flags, &path);"
+        print "\t\t\t\tif (unlikely(error)) {"
+        print "\t\t\t\t\tputname(fake_filename);"
+        print "\t\t\t\t\treturn error;"
+        print "\t\t\t\t}"
+        print "\t\t\t}"
+        print "\t\t}"
+        print "#endif"
+        next
+    }
+
+    in_do_o_path && /return error;/ {
+        print "#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT"
+        print "\tif (fake_filename && !IS_ERR(fake_filename))"
+        print "\t\tputname(fake_filename);"
+        print "#endif"
+        print $0
+        in_do_o_path = 0
+        next
+    }
+
+    /* 匹配 path_openat 开头注入 */
+    /static struct file \*path_openat\(struct nameidata \*nd,/ {
+        in_path_openat = 1
+        print $0
+        next
+    }
+
+    in_path_openat && /const char \*s;/ {
+        print "#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT"
+        print "\tint old_dfd = nd->dfd;"
+        print "\tstruct filename *fake_filename = NULL;"
+        print "#endif"
+        print $0
+        in_path_openat = 0
+        next
+    }
+
+    { print }
+    ' "$NAMEI_FILE" > "${NAMEI_FILE}.tmp" && mv "${NAMEI_FILE}.tmp" "$NAMEI_FILE"
+fi
+
+# ---------------------------------------------------------------------
+# 5. 修复 kernel/sys.c
 # ---------------------------------------------------------------------
 SYS_FILE="kernel/sys.c"
 if [ -f "$SYS_FILE" ]; then
-    echo "[+] Patching $SYS_FILE (Applying isolated static_branch Uname hook via memcpy)..."
+    echo "[+] Patching $SYS_FILE..."
     
     awk '
-    BEGIN { 
-        header_added = 0; 
-        in_newuname = 0;
-    }
+    BEGIN { header_added = 0; in_newuname = 0; }
 
-    # 1. 拦截 newuname 系统调用入口点，注入对应的全局变量与 extern 声明
     /SYSCALL_DEFINE1\(newuname, struct new_utsname __user \*, name\)/ {
         if (!header_added) {
             print "#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME"
@@ -304,25 +230,22 @@ if [ -f "$SYS_FILE" ]; then
         in_newuname = 1
     }
 
-    # 2. 如果状态机处于激活状态，且撞到了数据拷贝结束点 memcpy(&tmp, utsname(), sizeof(tmp));
     /memcpy\(&tmp, utsname\(\), sizeof\(tmp\)\);/ {
-        print $0  # 先把原原本本的 memcpy 这一行打印出来
+        print $0
         if (in_newuname == 1) {
             print "#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME"
             print "\tif (static_branch_likely(&susfs_is_uname_spoof_buffer_set))"
             print "\t\tsusfs_spoof_uname(&tmp);"
             print "#endif"
-            in_newuname = 0 # 注入完毕，立刻关闭状态机，防止波及后续的宏定义和系统调用
+            in_newuname = 0
         }
-        next  # 跳过普通打印，防止该行重复
+        next
     }
 
-    /^}/ {
-        in_newuname = 0
-    }
+    /^}/ { in_newuname = 0 }
 
     { print }
     ' "$SYS_FILE" > "${SYS_FILE}.tmp" && mv "${SYS_FILE}.tmp" "$SYS_FILE"
 fi
 
-echo "🎉 [SusFS Rescue Engine] ASCII-Safe patch completed. Safe to compile now!"
+echo "🎉 [SusFS Rescue Engine] Fully aligned and ready for pipeline build!"
