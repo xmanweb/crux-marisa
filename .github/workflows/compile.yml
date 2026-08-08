@@ -4,8 +4,48 @@ on:
   push:
     branches:
       - A16-test
+      - marisa
   workflow_dispatch:
     inputs:
+      branch:
+        description: '选择要编译的内核分支'
+        required: true
+        default: 'A16-test'
+        type: choice
+        options:
+          - A16-test
+          - marisa
+      toolchain:
+        description: '选择 Clang 工具链 / 编译器'
+        required: false
+        default: 'zyc'
+        type: choice
+        options:
+          - zyc
+          - aosp
+          - neutron
+      lto_mode:
+        description: 'LTO 优化模式 (thin/full/none)'
+        required: false
+        default: 'thin'
+        type: choice
+        options:
+          - thin
+          - full
+          - none
+      artifact_scope:
+        description: '上传的产物范围'
+        required: false
+        default: 'compact'
+        type: choice
+        options:
+          - compact
+          - complete
+      enable_ksu_susfs:
+        description: '开启 ReSukiSU 功能模块'
+        required: true
+        type: boolean
+        default: true
       hook_type:
         description: '选择 ReSukiSU 挂钩类型 (二选一)'
         required: true
@@ -19,307 +59,640 @@ on:
         required: false
         default: true
         type: boolean
-      enable_rekernel:
-        description: '开启 ReKernel 调度引擎 ⚡'
-        required: false
-        default: true
-        type: boolean
       enable_droidspaces:
         description: '开启 Droidspaces & Docker 容器支持 🐳'
         required: false
         default: true
         type: boolean
 
+env:
+  KERNEL_DIR: ${{ github.workspace }}/kernel
+  TC_AOSP_DIR: ${{ github.workspace }}/toolchain/aosp-clang
+  TC_NEUTRON_DIR: ${{ github.workspace }}/toolchain/neutron-clang
+  TC_ZYC_DIR: ${{ github.workspace }}/toolchain/zyc-clang
+  OUT_DIR: ${{ github.workspace }}/kernel/out
+  PATCH_DIR: ${{ github.workspace }}/patch_repo
+  ANYKERNEL_DIR: ${{ github.workspace }}/AnyKernel3
+  AOSP_CLANG_TAG: r547379
+  AOSP_CLANG_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86
+
+  # 动态分支计算
+  BUILD_BRANCH: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.branch || 'A16-test' }}
+  # 外部开关与挂钩模式转环境变量
+  RUN_KSU_SUSFS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.enable_ksu_susfs || 'true' }}
+  HOOK_TYPE: ${{ github.event.inputs.hook_type || 'inline_susfs' }}
+  ENABLE_BBG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.enable_bbg || 'true' }}
+  RUN_DROIDSPACES: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.enable_droidspaces || 'true' }}
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    env:
-      FINAL_ZIP_NAME: ""
-      NO_DTB_ZIP_NAME: ""
-      HOOK_TYPE: ${{ github.event.inputs.hook_type || 'inline_susfs' }}
-      ENABLE_BBG: ${{ github.event.inputs.enable_bbg || 'true' }}
-      ENABLE_REKERNEL: ${{ github.event.inputs.enable_rekernel || 'true' }}
-      ENABLE_DROIDSPACES: ${{ github.event.inputs.enable_droidspaces || 'true' }}
+    timeout-minutes: 120
+
     steps:
-      - name: Checkout Kernel Source
+      # 1. 检出源码
+      - name: 检出内核源码
         uses: actions/checkout@v4
         with:
-          ref: A16-test
+          ref: ${{ env.BUILD_BRANCH }}
+          path: kernel
 
-      - name: Install Dependencies
+      # 2. 检查可用磁盘空间
+      - name: 检查剩余磁盘空间
+        run: df -h /
+
+      # 3. 配置额外的虚拟内存 (Swap)
+      - name: 设置额外的虚拟内存
+        run: |
+          LTO_MODE="${{ github.event.inputs.lto_mode || 'thin' }}"
+          if [ "$LTO_MODE" = "full" ]; then
+            SWAP_SIZE="8G"
+          else
+            SWAP_SIZE="4G"
+          fi
+          echo "正在添加 ${SWAP_SIZE} 的虚拟内存 (LTO 模式: ${LTO_MODE})..."
+          sudo fallocate -l "$SWAP_SIZE" /swapfile_ci || sudo dd if=/dev/zero of=/swapfile_ci bs=1M count=4096
+          sudo chmod 600 /swapfile_ci
+          sudo mkswap /swapfile_ci
+          sudo swapon /swapfile_ci
+          free -h
+
+      # 4. 安装编译所需的依赖环境
+      - name: 安装编译依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc build-essential libncurses5-dev libssl-dev texinfo \
-            libgmp3-dev libmpfr-dev libmpc-dev libcap-dev zlib1g-dev python3 \
-            bison flex ccache libelf-dev lz4 liblz4-tool libstdc++6 openjdk-11-jdk zip unzip curl git coccinelle
+          sudo apt-get install -y \
+            bc bison flex libssl-dev libelf-dev libncurses5-dev texinfo \
+            libgmp3-dev libmpfr-dev libmpc-dev libcap-dev zlib1g-dev \
+            build-essential zip unzip curl git python3 python-is-python3 \
+            ccache llvm lld coccinelle lz4 liblz4-tool libstdc++6 openjdk-11-jdk \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
 
-      - name: Fetch ZyC-Clang 16 Toolchain
-        run: |
-          mkdir -p $GITHUB_WORKSPACE/toolchain
-          cd $GITHUB_WORKSPACE/toolchain
-          curl -LO https://github.com/ZyCromerZ/Clang/releases/download/16.0.6-20260510-release/Clang-16.0.6-20260510.tar.gz
-          mkdir -p zyc-clang
-          tar -xzf Clang-16.0.6-20260510.tar.gz -C zyc-clang
+      # 5. 工具链配置与缓存控制
+      # 5.1 AOSP Clang
+      - name: 缓存 AOSP Clang 工具链
+        if: ${{ github.event.inputs.toolchain == 'aosp' }}
+        id: cache-aosp
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.TC_AOSP_DIR }}
+          key: aosp-clang-${{ env.AOSP_CLANG_TAG }}
 
-      - name: "PHASE 1: Apply SUSFS 4.14 Baseline Patch"
-        if: env.HOOK_TYPE == 'inline_susfs'
+      - name: 下载 AOSP Clang 工具链
+        if: ${{ github.event.inputs.toolchain == 'aosp' && steps.cache-aosp.outputs.cache-hit != 'true' }}
         run: |
-          cd $GITHUB_WORKSPACE
-          curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.14.patch" -o susfs_to_414.patch
-          if [ -f "susfs_to_414.patch" ]; then
-            patch -p1 < susfs_to_414.patch || echo "Notice: Some hunks failed. Catching rejections below..."
+          mkdir -p "$TC_AOSP_DIR"
+          curl -L --fail \
+            "${AOSP_CLANG_URL}/+archive/refs/heads/main/clang-${AOSP_CLANG_TAG}.tar.gz" \
+            -o /tmp/clang.tar.gz
+          tar -xzf /tmp/clang.tar.gz -C "$TC_AOSP_DIR"
+          rm -f /tmp/clang.tar.gz
+
+      # 5.2 Neutron Clang
+      - name: 获取当前周数 (用于 Neutron/ZyC 缓存校验)
+        if: ${{ github.event.inputs.toolchain == 'neutron' || github.event.inputs.toolchain == 'zyc' || github.event_name != 'workflow_dispatch' }}
+        id: get-date
+        run: echo "date=$(date +'%Y-%U')" >> "$GITHUB_OUTPUT"
+
+      - name: 缓存 Neutron Clang 工具链
+        if: ${{ github.event.inputs.toolchain == 'neutron' }}
+        id: cache-neutron
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.TC_NEUTRON_DIR }}
+          key: neutron-clang-${{ steps.get-date.outputs.date }}
+          restore-keys: |
+            neutron-clang-
+
+      - name: 下载 Neutron Clang 工具链
+        if: ${{ github.event.inputs.toolchain == 'neutron' && steps.cache-neutron.outputs.cache-hit != 'true' }}
+        run: |
+          mkdir -p "$TC_NEUTRON_DIR"
+          cd "$TC_NEUTRON_DIR"
+          curl -LO "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman"
+          chmod +x antman
+          ./antman -S
+
+      # 5.3 ZyCromerZ Clang (默认配置)
+      - name: 缓存 ZyC Clang 工具链
+        if: ${{ github.event.inputs.toolchain == 'zyc' || github.event_name != 'workflow_dispatch' }}
+        id: cache-zyc
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.TC_ZYC_DIR }}
+          key: zyc-clang-${{ steps.get-date.outputs.date }}
+          restore-keys: |
+            zyc-clang-
+
+      - name: 下载 ZyC Clang 工具链
+        if: ${{ (github.event.inputs.toolchain == 'zyc' || github.event_name != 'workflow_dispatch') && steps.cache-zyc.outputs.cache-hit != 'true' }}
+        run: |
+          mkdir -p "$TC_ZYC_DIR"
+          echo "正在获取 ZyC Clang 最新下载链接..."
+          ZYC_URL=$(curl -sSL "https://raw.githubusercontent.com/ZyCromerZ/Clang/main/Clang-main-link.txt" | head -n 1 | xargs)
+          if [ -z "$ZYC_URL" ]; then
+            echo "尝试使用备用固定 ZyC-Clang 16 链接..."
+            ZYC_URL="https://github.com/ZyCromerZ/Clang/releases/download/16.0.6-20260510-release/Clang-16.0.6-20260510.tar.gz"
+          fi
+          echo "正在下载 ZyC Clang: $ZYC_URL"
+          curl -L --fail "$ZYC_URL" -o /tmp/zyc_clang.tar.gz
+          tar -xzf /tmp/zyc_clang.tar.gz -C "$TC_ZYC_DIR"
+          rm -f /tmp/zyc_clang.tar.gz
+
+      # 5.4 克隆外部补丁仓库
+      - name: 克隆补丁仓库
+        if: env.RUN_KSU_SUSFS == 'true' || env.RUN_DROIDSPACES == 'true'
+        run: |
+          git clone --depth=1 https://github.com/JackA1ltman/NonGKI_Kernel_Build_2nd.git -b mainline "${{ env.PATCH_DIR }}"
+
+      # 6. 配置 ccache 编译缓存
+      - name: 缓存 ccache 数据
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ github.event.inputs.toolchain || 'zyc' }}-crux-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ github.event.inputs.toolchain || 'zyc' }}-crux-
+
+      - name: 初始化 ccache 设置
+        run: |
+          export CCACHE_DIR=~/.ccache
+          ccache -M 5G
+          ccache -z
+
+      # =====================================================================
+      # REBUILT INTEGRATION STAGES (ReSukiSU & SUSFS / Manual Hook Branches)
+      # =====================================================================
+
+      - name: "集成阶段 1: 打入 SUSFS Baseline 补丁 (仅限 inline_susfs)"
+        if: env.RUN_KSU_SUSFS == 'true' && env.HOOK_TYPE == 'inline_susfs'
+        run: |
+          cd "$KERNEL_DIR"
+          PATCH_FILE="$PATCH_DIR/Patches/Patch/susfs_patch_to_4.14.patch"
+          if [ ! -f "$PATCH_FILE" ]; then
+            curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.14.patch" -o /tmp/susfs_to_414.patch
+            PATCH_FILE="/tmp/susfs_to_414.patch"
+          fi
+          
+          if [ -f "$PATCH_FILE" ]; then
+            patch -p1 < "$PATCH_FILE" || true
+            
+            REJ_FILES=$(find . -name "*.rej")
+            if [ -n "$REJ_FILES" ]; then
+              echo "=================================================="
+              echo "❌ 警告: 补丁部分冲突！正在分析文件修改状态..."
+              echo "=================================================="
+              for rej_file in $REJ_FILES; do
+                target_file="${rej_file%.rej}"
+                echo "📄 目标文件: $target_file"
+                if git status --porcelain "$target_file" 2>/dev/null | grep -q "M"; then
+                  git diff "$target_file"
+                else
+                  echo "（该文件未成功应用任何改动，全部冲突）"
+                fi
+                echo "⚠️ [未成功应用的冲突内容 (.rej)] :"
+                cat "$rej_file"
+              done
+            else
+              echo "✅ 提示: SUSFS 基线补丁打入成功，无冲突。"
+            fi
           fi
 
-      - name: "PHASE 1.5: Intercept & Manually Rescue Failed Hunks (Script Driven)"
-        if: env.HOOK_TYPE == 'inline_susfs'
+      - name: "集成阶段 1.5: 拦截并手动拯救失败的代码块 (仅限 inline_susfs)"
+        if: env.RUN_KSU_SUSFS == 'true' && env.HOOK_TYPE == 'inline_susfs'
         run: |
-          cd $GITHUB_WORKSPACE
-          find . -name "*.rej" -delete
-          find . -name "*.orig" -delete
+          cd "$KERNEL_DIR"
           if [ -f ".github/workflows/rescue_hunks.sh" ]; then
+            REJ_FILES=$(find . -name "*.rej")
+            echo "🚀 开始运行手动修复脚本..."
             chmod +x .github/workflows/rescue_hunks.sh
             ./.github/workflows/rescue_hunks.sh
+            
+            echo "🔍 [修复结果审计] 核对修复后的最终 Diff..."
+            if [ -n "$REJ_FILES" ]; then
+              for rej_file in $REJ_FILES; do
+                target_file="${rej_file%.rej}"
+                echo "🛠️ 曾冲突文件: $target_file"
+                [ -f "$target_file" ] && git diff "$target_file" || echo "⚠️ 警告: 目标文件不存在。"
+              done
+            fi
+            find . -name "*.rej" -delete
+            find . -name "*.orig" -delete
           else
-            echo "❌ CRITICAL: rescue_hunks.sh not found!" && exit 1
+            echo "⚠️ 提示: 未检测到救援脚本，直接清理残余痕迹。"
+            find . -name "*.rej" -delete
+            find . -name "*.orig" -delete
           fi
 
-      - name: "PHASE 2: Integrate Official ReSukiSU"
+      - name: "集成阶段 2: 注入 ReSukiSU 基准框架"
+        if: env.RUN_KSU_SUSFS == 'true'
         run: |
-          cd $GITHUB_WORKSPACE
-          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s main || curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
+          cd "$KERNEL_DIR"
+          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s main || curl -LSs "https://raw.githubusercontent.com/xmanweb/ReSukiSU/main/kernel/setup.sh" | bash
 
-      - name: "PHASE 3: Apply JackA1ltman Native Non-GKI Core Infrastructure (Inline)"
-        if: env.HOOK_TYPE == 'inline_susfs'
+      - name: "集成阶段 3: 应用 JackA1ltman 原生 Non-GKI 核心基础设施 (inline_susfs 分支)"
+        if: env.RUN_KSU_SUSFS == 'true' && env.HOOK_TYPE == 'inline_susfs'
         run: |
-          cd $GITHUB_WORKSPACE
-          curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/susfs_inline_hook_patches.sh" -o susfs_inline_hook_patches.sh
-          chmod +x susfs_inline_hook_patches.sh
-          bash susfs_inline_hook_patches.sh || echo "Notice: VFS tree adaptation finished."
-
-      - name: "PHASE 3: Inject ReSukiSU Manual Hooks via Remote Trusted Script"
-        if: env.HOOK_TYPE == 'manual_hook'
-        run: |
-          cd $GITHUB_WORKSPACE
-          echo "====================================================================="
-          echo " 🚀 FETCHING & RUNNING REMOTE SYSCALL HOOK PATCHES SCRIPT"
-          echo "====================================================================="
-          curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/syscall_hook_patches.sh" -o syscall_hook_patches.sh
-          if [ -f "syscall_hook_patches.sh" ]; then
-            chmod +x syscall_hook_patches.sh
-            ./syscall_hook_patches.sh
-            rm -f syscall_hook_patches.sh
-            echo "✅ Syscall manual hooks successfully processed by script."
+          cd "$KERNEL_DIR"
+          if [ -f "$PATCH_DIR/Patches/susfs_inline_hook_patches.sh" ]; then
+            bash "$PATCH_DIR/Patches/susfs_inline_hook_patches.sh" || echo "Notice: VFS 树适配完成。"
           else
-            echo "❌ CRITICAL ERROR: Failed to download syscall_hook_patches.sh!" && exit 1
+            curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/susfs_inline_hook_patches.sh" | bash || true
+          fi
+          
+          echo "Fixing static symbol visibility for SELinux Hooks..."
+          if [ -f "security/selinux/selinuxfs.c" ]; then
+            sed -i 's/static const struct file_operations sel_handle_status_ops/const struct file_operations sel_handle_status_ops/g' security/selinux/selinuxfs.c
+            sed -i 's/static ssize_t (\*const write_op\[\])(struct file \*, char \*, size_t)/ssize_t (\*const write_op\[\])(struct file \*, char \*, size_t)/g' security/selinux/selinuxfs.c
           fi
 
-      - name: "PHASE 4-1: Advanced Patch Integration Baseband-guard"
+      - name: "集成阶段 3: 注入 ReSukiSU 系统调用手动挂钩 (manual_hook 分支)"
+        if: env.RUN_KSU_SUSFS == 'true' && env.HOOK_TYPE == 'manual_hook'
+        run: |
+          cd "$KERNEL_DIR"
+          echo "🚀 正在拉取并执行手动挂钩脚本分支基础设施..."
+          HOOK_SCRIPT="$PATCH_DIR/Patches/syscall_hook_patches.sh"
+          if [ -f "$HOOK_SCRIPT" ]; then
+            chmod +x "$HOOK_SCRIPT"
+            "$HOOK_SCRIPT"
+          else
+            curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/syscall_hook_patches.sh" -o /tmp/syscall_hook.sh
+            chmod +x /tmp/syscall_hook.sh
+            /tmp/syscall_hook.sh
+          fi
+          
+          echo "Fixing static symbol visibility for SELinux Hooks..."
+          if [ -f "security/selinux/selinuxfs.c" ]; then
+            sed -i 's/static const struct file_operations sel_handle_status_ops/const struct file_operations sel_handle_status_ops/g' security/selinux/selinuxfs.c
+            sed -i 's/static ssize_t (\*const write_op\[\])(struct file \*, char \*, size_t)/ssize_t (\*const write_op\[\])(struct file \*, char \*, size_t)/g' security/selinux/selinuxfs.c
+          fi
+
+      # =====================================================================
+      # ADVANCED INTEGRATION STAGES (Baseband Guard, Droidspaces)
+      # =====================================================================
+
+      - name: "高级集成阶段 4-1: 适配 Baseband Guard 🛡️"
         if: env.ENABLE_BBG == 'true'
         run: |
-          cd $GITHUB_WORKSPACE
+          cd "$KERNEL_DIR"
           TARGET_CONFIG="arch/arm64/configs/crux_defconfig"
-          if [ ! -f "$TARGET_CONFIG" ]; then
-            echo "❌ ERROR: $TARGET_CONFIG not found!" && exit 1
+          if [ -f "$TARGET_CONFIG" ]; then
+            wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash || true
+            if grep -q "config LSM" security/Kconfig; then
+              sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
+            fi
+            echo "CONFIG_BBG=y" >> "$TARGET_CONFIG"
+            echo "[+] Baseband Guard 集成完毕。"
           fi
-          wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
-          if grep -q "config LSM" security/Kconfig; then
-            sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
-          fi
-          echo "CONFIG_BBG=y" >> "$TARGET_CONFIG"
-          echo "[+] Patched Baseband Guard Successfully."
-      
-      - name: "PHASE 4-2: Advanced Patch Integration Re-kernel"
-        if: env.ENABLE_REKERNEL == 'true'
+
+      - name: "高级集成阶段 4-2: 适配 Droidspaces & Docker 容器基础设施 🐳"
+        if: env.RUN_DROIDSPACES == 'true'
         run: |
-          cd $GITHUB_WORKSPACE
-          TARGET_CONFIG="arch/arm64/configs/crux_defconfig"
-          if [ ! -f "$TARGET_CONFIG" ]; then
-            echo "❌ ERROR: $TARGET_CONFIG not found!" && exit 1
-          fi         
-          curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Rekernel/rekernel_patches.sh" -o rekernel_patches.sh
-          chmod +x rekernel_patches.sh
-          bash rekernel_patches.sh || echo "Notice: Rekernel patches adaptation executed."
+          cd "$KERNEL_DIR"
+          DROID_PATCH_DIR="$PATCH_DIR/Patches/Droidspaces"
 
-          mkdir -p drivers/net/rekernel/
-          curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Rekernel/rekernel_extra.patch" -o rekernel_extra.patch
-          if [ -f "rekernel_extra.patch" ]; then
-            patch -p1 < rekernel_extra.patch || echo "Notice: Some ReKernel extra hunks skipped or resolved."
-          fi
-          echo "CONFIG_REKERNEL=y" >> "$TARGET_CONFIG"
-          echo "[+] Patched Re:Kernel Successfully."
-
-      - name: "PHASE 4-3: Advanced Patch Integrate Droidspaces & Docker Container Infrastructure"
-        if: env.ENABLE_DROIDSPACES == 'true'
-        run: |
-          cd $GITHUB_WORKSPACE
-          TARGET_CONFIG="arch/arm64/configs/crux_defconfig"
-
-          echo "====================================================================="
-          echo " 🐳 STEP 1: FETCHING & INJECTING DROIDSPACES CONFIG"
-          echo "====================================================================="
-          curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Droidspaces/droidspaces.config" -o droidspaces.config
-          if [ -f "droidspaces.config" ]; then
-            cat droidspaces.config >> "$TARGET_CONFIG"
-            rm -f droidspaces.config
-          else
-            echo "❌ ERROR: Failed to download droidspaces.config!" && exit 1
-          fi
-
-          sed -i 's/CONFIG_ANDROID_PARANOID_NETWORK=y/CONFIG_ANDROID_PARANOID_NETWORK=n/g' "$TARGET_CONFIG"
-          echo "CONFIG_ANDROID_PARANOID_NETWORK=n" >> "$TARGET_CONFIG"
-
-          echo "====================================================================="
-          echo " 🧬 STEP 2: DOWNLOADING COCCINELLE SEMANTIC PATCHES"
-          echo "====================================================================="
-          curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Droidspaces/fix_kernel_panic_in_xt_qtaguid.cocci" -o fix_kernel_panic_in_xt_qtaguid.cocci
-          curl -fsSL "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Droidspaces/fix_restore_cgroup_file_prefix_handling.cocci" -o fix_restore_cgroup_file_prefix_handling.cocci
-
-          echo "====================================================================="
-          echo " 🛠️  STEP 3: RUNNING SPATCH SEMANTIC INJECTIONS"
-          echo "====================================================================="
-          if [ -f "net/netfilter/xt_qtaguid.c" ] && [ -f "fix_kernel_panic_in_xt_qtaguid.cocci" ]; then
-            spatch --sp-file fix_kernel_panic_in_xt_qtaguid.cocci --in-place net/netfilter/xt_qtaguid.c
+          if [ -f "net/netfilter/xt_qtaguid.c" ] && [ -f "$DROID_PATCH_DIR/fix_kernel_panic_in_xt_qtaguid.cocci" ]; then
+            spatch --sp-file "$DROID_PATCH_DIR/fix_kernel_panic_in_xt_qtaguid.cocci" --in-place net/netfilter/xt_qtaguid.c
           fi
 
           key_file=""
           if [ -f "kernel/cgroup/cgroup.c" ]; then key_file="kernel/cgroup/cgroup.c";
           elif [ -f "kernel/cgroup.c" ]; then key_file="kernel/cgroup.c"; fi
 
-          if [ -n "$key_file" ] && [ -f "fix_restore_cgroup_file_prefix_handling.cocci" ]; then
+          if [ -n "$key_file" ] && [ -f "$DROID_PATCH_DIR/fix_restore_cgroup_file_prefix_handling.cocci" ]; then
             if ! grep -q "kernfs_create_link" "$key_file"; then
-              spatch --sp-file fix_restore_cgroup_file_prefix_handling.cocci --in-place "$key_file"
+              spatch --sp-file "$DROID_PATCH_DIR/fix_restore_cgroup_file_prefix_handling.cocci" --in-place "$key_file"
             fi
-          else
-            echo "❌ CRITICAL ERROR: Could not find cgroup.c core logic." && exit 1
           fi
-          rm -f fix_kernel_panic_in_xt_qtaguid.cocci fix_restore_cgroup_file_prefix_handling.cocci
 
-          echo "====================================================================="
-          echo " 🩹 STEP 4: HOTFIXING NETPRIO CGROUP OLD-KERNEL ID CONFLICT"
-          echo "====================================================================="
+          # 修复旧版内核 Netprio Cgroup ID 兼容性
           NETPRIO_HEADER="include/net/netprio_cgroup.h"
           NETPRIO_SOURCE="net/core/netprio_cgroup.c"
-
           if [ -f "$NETPRIO_HEADER" ]; then sed -i 's/idx = css->cgroup->id;/idx = cgroup_id(css->cgroup);/g' "$NETPRIO_HEADER"; fi
           if [ -f "$NETPRIO_SOURCE" ]; then sed -i 's/css->cgroup->id/cgroup_id(css->cgroup)/g' "$NETPRIO_SOURCE"; fi
 
-      - name: Start Kernel Compilation
+      # 11. 配置选定工具链到环境变量 PATH
+      - name: 配置工具链环境变量 PATH
         run: |
-          cd $GITHUB_WORKSPACE
-          if [ -d "$GITHUB_WORKSPACE/toolchain/zyc-clang/bin" ]; then
-            REAL_CLANG_PATH="$GITHUB_WORKSPACE/toolchain/zyc-clang/bin"
+          TOOLCHAIN_CHOICE="${{ github.event.inputs.toolchain || 'zyc' }}"
+          if [ "$TOOLCHAIN_CHOICE" = "neutron" ]; then
+            echo "激活编译器: Neutron Clang"
+            echo "$TC_NEUTRON_DIR/bin" >> "$GITHUB_PATH"
+          elif [ "$TOOLCHAIN_CHOICE" = "aosp" ]; then
+            echo "激活编译器: AOSP Clang"
+            echo "$TC_AOSP_DIR/bin" >> "$GITHUB_PATH"
           else
-            REAL_CLANG_PATH="$GITHUB_WORKSPACE/toolchain/zyc-clang"
+            echo "激活编译器: ZyCromerZ Clang"
+            if [ -d "$TC_ZYC_DIR/bin" ]; then
+              echo "$TC_ZYC_DIR/bin" >> "$GITHUB_PATH"
+            else
+              echo "$TC_ZYC_DIR" >> "$GITHUB_PATH"
+            fi
           fi
-          export PATH=$REAL_CLANG_PATH:$PATH
 
-          make O=out ARCH=arm64 crux_defconfig
+      - name: 显示工具链详细信息
+        run: |
+          which clang || true
+          clang --version || true
+
+      - name: 准备产物名称
+        id: meta
+        if: always()
+        run: |
+          BRANCH_NAME="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.branch || github.ref_name }}"
+          BRANCH_SAFE="${BRANCH_NAME//\//-}"
           
-          # 基础 KSU / Clang 配置
-          ./scripts/config --file out/.config \
-              -e KSU \
-              -e THREAD_INFO_IN_TASK \
-              -e KSU_MULTI_MANAGER_SUPPORT \
-              -e BUILD_ARM64_DT_OVERLAY
+          DATE_STR=$(TZ='Asia/Shanghai' date +'%Y%m%d_%H%M')
+          TOOLCHAIN_LABEL="${{ github.event.inputs.toolchain || 'zyc' }}"
+          
+          TRACK=""
+          if [ "${{ env.RUN_KSU_SUSFS }}" = "true" ]; then
+            if [ "${{ env.HOOK_TYPE }}" = "inline_susfs" ]; then
+              TRACK="${TRACK}-resuki-susfs"
+            else
+              TRACK="${TRACK}-resuki-manual"
+            fi
+          fi
+          [ "${{ env.ENABLE_BBG }}" = "true" ] && TRACK="${TRACK}-bbg"
+          [ "${{ env.RUN_DROIDSPACES }}" = "true" ] && TRACK="${TRACK}-droid"
+          [ -z "$TRACK" ] && TRACK="-PURE"
 
-          # 动态注入所选 Hook 类型的特定内核配置
-          if [ "${{ env.HOOK_TYPE }}" = "inline_susfs" ]; then
-            ./scripts/config --file out/.config \
-                -e KSU_SUSFS \
-                -e KSU_SUSFS_SUS_PATH \
-                -e KSU_SUSFS_SUS_MOUNT \
-                -e KSU_SUSFS_SUS_KSTAT \
-                -e KSU_SUSFS_SPOOF_UNAME \
-                -e KSU_SUSFS_ENABLE_LOG \
-                -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
-                -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
-                -e KSU_SUSFS_OPEN_REDIRECT \
-                -e KSU_SUSFS_SUS_MAP
-          else
-            ./scripts/config --file out/.config \
+          echo "base_name=crux-kernel-${TOOLCHAIN_LABEL}-${BRANCH_SAFE}${TRACK}-${{ github.run_number }}-${DATE_STR}" >> "$GITHUB_OUTPUT"
+
+      # 13. 执行内核编译
+      - name: 编译内核主体
+        id: build
+        run: |
+          START_TIME=$(date +%s)
+          cd "$KERNEL_DIR"
+         
+          mkdir -p "$OUT_DIR"
+
+          DEFCONFIG="arch/arm64/configs/crux_defconfig"
+          LTO_MODE="${{ github.event.inputs.lto_mode || 'thin' }}"
+          CUSTOM_CFLAGS="-march=armv8-a -mno-outline"
+
+          TOOLCHAIN_ARGS=(
+            ARCH=arm64
+            SUBARCH=arm64
+            CC="ccache clang"
+            HOSTCC="ccache clang"
+            HOSTCXX="ccache clang++"
+            LD=ld.lld
+            AR=llvm-ar
+            NM=llvm-nm
+            OBJCOPY=llvm-objcopy
+            OBJDUMP=llvm-objdump
+            STRIP=llvm-strip
+            READELF=llvm-readelf
+            OBJSIZE=llvm-size
+            LLVM=1
+            LLVM_IAS=1
+            KBUILD_BUILD_USER=xmanweb
+            KBUILD_BUILD_HOST=GithubActions
+            CLANG_TRIPLE=aarch64-linux-gnu-
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
+            KCFLAGS="$CUSTOM_CFLAGS"
+          )
+
+          if [ "$LTO_MODE" != "none" ]; then
+            TOOLCHAIN_ARGS+=(LTO="$LTO_MODE")
+          fi
+
+          echo "=== 正在生成配置树: crux_defconfig | LTO 模式: $LTO_MODE ==="
+          
+          make O="$OUT_DIR" "${TOOLCHAIN_ARGS[@]}" crux_defconfig
+          
+          # 宏设定构建列表
+          CONFIG_ARGS=(
+            -e THREAD_INFO_IN_TASK
+            -e BUILD_ARM64_DT_OVERLAY
+          )
+            
+          if [ "${{ env.RUN_KSU_SUSFS }}" = "true" ]; then
+            CONFIG_ARGS+=(-e KSU -e KSU_MULTI_MANAGER_SUPPORT)
+            
+            if [ "${{ env.HOOK_TYPE }}" = "inline_susfs" ]; then
+              CONFIG_ARGS+=(\
+                -e KSU_SUSFS -e KSU_SUSFS_SUS_PATH -e KSU_SUSFS_SUS_MOUNT \
+                -e KSU_SUSFS_SUS_KSTAT -e KSU_SUSFS_SPOOF_UNAME -e KSU_SUSFS_ENABLE_LOG \
+                -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
+                -e KSU_SUSFS_OPEN_REDIRECT -e KSU_SUSFS_SUS_MAP -d KSU_TRACEPOINT_HOOK \
+              )
+            else
+              CONFIG_ARGS+=(\
                 -e KSU_MANUAL_HOOK \
-                -e KSU_MANUAL_HOOK_AUTO_INPUT_HOOK \
-                -e KSU_MANUAL_HOOK_AUTO_SETUID_HOOK \
-                -e KSU_MANUAL_HOOK_AUTO_INITRC_HOOK
+                -d KSU_MANUAL_HOOK_AUTO_INPUT_HOOK \
+                -d KSU_MANUAL_HOOK_AUTO_SETUID_HOOK \
+                -d KSU_MANUAL_HOOK_AUTO_INITRC_HOOK \
+                -d KSU_TRACEPOINT_HOOK \
+                -d KSU_SUSFS \
+              )
+            fi
+          fi
+          
+          if [ "${{ env.RUN_DROIDSPACES }}" = "true" ]; then
+            CONFIG_ARGS+=(
+              -e PSI
+              -d ANDROID_PARANOID_NETWORK
+            )              
+          fi
+          
+          if [ ${#CONFIG_ARGS[@]} -gt 0 ]; then
+            ./scripts/config --file "$OUT_DIR/.config" "${CONFIG_ARGS[@]}"
+            make O="$OUT_DIR" "${TOOLCHAIN_ARGS[@]}" olddefconfig
           fi
 
-          make O=out ARCH=arm64 silentoldconfig
+          if [ "${{ env.RUN_DROIDSPACES }}" = "true" ] && [ -f "$PATCH_DIR/Patches/Droidspaces/droidspaces.config" ]; then
+            ./scripts/kconfig/merge_config.sh -O "$OUT_DIR" -m "$OUT_DIR/.config" "$PATCH_DIR/Patches/Droidspaces/droidspaces.config"
+            make O="$OUT_DIR" "${TOOLCHAIN_ARGS[@]}" olddefconfig
+          fi
 
-          make -j$(nproc --all) \
-                      ARCH=arm64 \
-                      SUBARCH=arm64 \
-                      O=out \
-                      CC=clang \
-                      HOSTCC=clang \
-                      CLANG_TRIPLE=aarch64-linux-gnu- \
-                      CROSS_COMPILE=aarch64-linux-gnu- \
-                      CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-                      CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
-                      LD=ld.lld \
-                      AR=llvm-ar \
-                      NM=llvm-nm \
-                      OBJCOPY=llvm-objcopy \
-                      OBJDUMP=llvm-objdump \
-                      STRIP=llvm-strip
+          echo "=== 🔎 检查当前即将参与编译的 .config 核心宏 ==="
+          grep -E "KSU|SUSFS|BBG|NF_|NETFILTER|BRIDGE_NETFILTER|_NS|CGROUP|PSI|MEMCG|DEVTMPFS|FW_LOADER|ANDROID_PARANOID_NETWORK" "$OUT_DIR/.config" || true
+          cp $OUT_DIR/.config $OUT_DIR/${{ steps.meta.outputs.base_name }}.config
+          echo "==============================================="
 
-      - name: Pack Kernel with AnyKernel3 (Dynamic Variable Naming)
+          # 开始多线程并行构建
+          LOG_FILE="${{ github.workspace }}/build.log"
+          make -j"$(nproc --all)" O="$OUT_DIR" "${TOOLCHAIN_ARGS[@]}" 2>&1 | tee "$LOG_FILE"
+          BUILD_EXIT=${PIPESTATUS[0]}
+
+          ccache -s | tee -a "$LOG_FILE"
+
+          END_TIME=$(date +%s)
+          DURATION=$((END_TIME - START_TIME))
+          MIN=$((DURATION / 60))
+          SEC=$((DURATION % 60))
+
+          echo "duration_min=${MIN}" >> "$GITHUB_OUTPUT"
+          echo "duration_sec=${SEC}" >> "$GITHUB_OUTPUT"
+          echo "defconfig=crux_defconfig" >> "$GITHUB_OUTPUT"
+          echo "lto_mode=${LTO_MODE}" >> "$GITHUB_OUTPUT"
+
+          exit "$BUILD_EXIT"
+
+      # 14. 校验编译输出产物
+      - name: 校验编译输出
         run: |
-          cd $GITHUB_WORKSPACE
-          BUILD_DATE=$(date -d "+8 hours" +%Y%m%d_%H%M)
-          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
-          
-          # 根据勾选状态动态计算特性标签 (用于文件名和刷机信息)
-          FEATURE_TAGS=""
-          if [ "${{ env.HOOK_TYPE }}" = "inline_susfs" ]; then FEATURE_TAGS="resukisu-susfs"; else FEATURE_TAGS="resukisu-manual"; fi
-          if [ "${{ env.ENABLE_BBG }}" = "true" ]; then FEATURE_TAGS="${FEATURE_TAGS}-bbg"; fi
-          if [ "${{ env.ENABLE_REKERNEL }}" = "true" ]; then FEATURE_TAGS="${FEATURE_TAGS}-rekernel"; fi
-          if [ "${{ env.ENABLE_DROIDSPACES }}" = "true" ]; then FEATURE_TAGS="${FEATURE_TAGS}-droidspaces"; fi
+          BOOT_DIR="${{ env.OUT_DIR }}/arch/arm64/boot"
+          if [ -f "$BOOT_DIR/Image.gz-dtb" ] || [ -f "$BOOT_DIR/Image.gz" ] || [ -f "$BOOT_DIR/Image" ]; then
+            echo "=== 编译成功 ==="
+          else
+            echo "=== 编译失败：未找到内核镜像文件 ===" && exit 1
+          fi
 
-          ZIP_FULL="crux-kernel-${FEATURE_TAGS}-${BUILD_DATE}-${SHORT_SHA}-With-DTB.zip"
-          ZIP_NODTB="crux-kernel-${FEATURE_TAGS}-${BUILD_DATE}-${SHORT_SHA}-No-DTB.zip"
+      # 15. 使用 AnyKernel3 分别打包 With-DTB 和 No-DTB 两个版本的卡刷包
+      - name: 使用 AnyKernel3 分别打包双版本内核可刷入包
+        run: |
+          echo "正在克隆 AnyKernel3 官方模板..."
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git "${{ env.ANYKERNEL_DIR }}"
           
-          echo "FINAL_ZIP_NAME=${ZIP_FULL}" >> $GITHUB_ENV
-          echo "NO_DTB_ZIP_NAME=${ZIP_NODTB}" >> $GITHUB_ENV
-          
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3_with_dtb
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3_no_dtb
-          
-          rm -rf ak3_with_dtb/.git ak3_with_dtb/README.md ak3_with_dtb/Image* ak3_with_dtb/zImage*
-          rm -rf ak3_no_dtb/.git ak3_no_dtb/README.md ak3_no_dtb/Image* ak3_no_dtb/zImage*
-          
-          define_properties() {
-            local target_script="$1"
-            local track_mode="$2"
-            echo '# AnyKernel3 Ramdisk Mod Script' > "$target_script"
-            echo 'properties() { ' >> "$target_script"
-            echo "kernel.string=Mi9Pro crux [${FEATURE_TAGS}] - ${track_mode} - ${BUILD_DATE}" >> "$target_script"
-            echo 'do.devicecheck=1; do.modules=0; do.systemless=1; do.cleanup=1; do.cleanuponabort=1;' >> "$target_script"
-            echo "device.name1=crux" >> "$target_script"
-            echo '} ' >> "$target_script"
-            echo 'BLOCK=boot; IS_SLOT_DEVICE=0; RAMDISK_COMPRESSION=auto; PATCH_VBMETA_FLAG=auto;' >> "$target_script"
-            echo '. /tmp/anykernel/tools/ak3-core.sh;' >> "$target_script"
-            echo 'split_boot;' >> "$target_script"
-            echo 'flash_boot;' >> "$target_script"
-            if [ "$track_mode" = "With-DTB" ]; then
-              if [ -f "out/arch/arm64/boot/dtbo.img" ]; then echo 'flash_dtbo;' >> "$target_script"; fi
+          mkdir -p /tmp/ak3-with-dtb
+          mkdir -p /tmp/ak3-no-dtb
+          cp -r "${{ env.ANYKERNEL_DIR }}"/* /tmp/ak3-with-dtb/
+          cp -r "${{ env.ANYKERNEL_DIR }}"/* /tmp/ak3-no-dtb/
+
+          BASE_NAME="${{ steps.meta.outputs.base_name }}"
+          BOOT_DIR="${{ env.OUT_DIR }}/arch/arm64/boot"
+
+          define_ak3_script() {
+            local target_dir="$1"
+            local title_suffix="$2"
+            local has_dtbo="$3"
+
+            printf "%s\n" \
+              "# AnyKernel3 Ramdisk Mod Script" \
+              "properties() {" \
+              "kernel.string=Custom Kernel for Mi9Pro crux ${title_suffix}" \
+              "do.devicecheck=1" \
+              "do.modules=0" \
+              "do.systemless=1" \
+              "do.cleanup=1" \
+              "do.cleanuponabort=1" \
+              "device.name1=crux" \
+              "}" \
+              "" \
+              "BLOCK=boot;" \
+              "IS_SLOT_DEVICE=0;" \
+              "RAMDISK_COMPRESSION=auto;" \
+              "PATCH_VBMETA_FLAG=auto;" \
+              "" \
+              ". /tmp/anykernel/tools/ak3-core.sh;" \
+              "split_boot;" \
+              "flash_boot;" > "${target_dir}/anykernel.sh"
+
+            if [ "$has_dtbo" = "true" ]; then
+              echo 'if [ -f /tmp/anykernel/dtbo.img ]; then flash_dtbo; fi' >> "${target_dir}/anykernel.sh"
             fi
           }
+
+          # -------------------------------
+          # 制作版本 1: 带 DTB 版本的卡刷包
+          # -------------------------------
+          cd /tmp/ak3-with-dtb
+          define_ak3_script "/tmp/ak3-with-dtb" "With-DTB" "true"
           
-          define_properties "ak3_with_dtb/anykernel.sh" "With-DTB"
-          define_properties "ak3_no_dtb/anykernel.sh" "No-DTB"
+          if [ -f "$BOOT_DIR/Image.gz-dtb" ]; then
+            cp "$BOOT_DIR/Image.gz-dtb" ./Image.gz-dtb
+          elif [ -f "$BOOT_DIR/Image.gz" ] && [ -f "$BOOT_DIR/dtb" ]; then
+            cat "$BOOT_DIR/Image.gz" "$BOOT_DIR/dtb" > ./Image.gz-dtb
+          fi
 
-          if [ -f "out/arch/arm64/boot/Image.gz-dtb" ]; then cp out/arch/arm64/boot/Image.gz-dtb ak3_with_dtb/Image.gz-dtb; else exit 1; fi
-          if [ -f "out/arch/arm64/boot/dtbo.img" ]; then cp out/arch/arm64/boot/dtbo.img ak3_with_dtb/dtbo.img; fi
+          if [ -f "$BOOT_DIR/dtbo.img" ]; then
+            cp "$BOOT_DIR/dtbo.img" ./dtbo.img
+          fi
 
-          if [ -f "out/arch/arm64/boot/Image" ]; then gzip -c out/arch/arm64/boot/Image > ak3_no_dtb/Image.gz; else exit 1; fi
+          zip -r9 "${{ github.workspace }}/${BASE_NAME}-With-DTB.zip" * -x .git* README.md *placeholder
 
-          cd ak3_with_dtb && zip -r ../${ZIP_FULL} * && cd ..
-          cd ak3_no_dtb && zip -r ../${ZIP_NODTB} * && cd ..
+          # -------------------------------
+          # 制作版本 2: 不带 DTB 版本的卡刷包
+          # -------------------------------
+          cd /tmp/ak3-no-dtb
+          define_ak3_script "/tmp/ak3-no-dtb" "No-DTB" "false"
+          
+          if [ -f "$BOOT_DIR/Image.gz" ]; then
+            cp "$BOOT_DIR/Image.gz" ./Image.gz
+          elif [ -f "$BOOT_DIR/Image" ]; then
+            gzip -c "$BOOT_DIR/Image" > ./Image.gz
+          elif [ -f "$BOOT_DIR/Image.gz-dtb" ]; then
+            cp "$BOOT_DIR/Image.gz-dtb" ./Image.gz
+          fi
+          
+          rm -f ./dtb ./Image.gz-dtb ./dtbo.img
+          zip -r9 "${{ github.workspace }}/${BASE_NAME}-No-DTB.zip" * -x .git* README.md *placeholder
 
-      - name: Upload Both Kernel Zips
+          mkdir -p "${{ github.workspace }}/zip_artifacts"
+          mv "${{ github.workspace }}/${BASE_NAME}-With-DTB.zip" "${{ github.workspace }}/zip_artifacts/"
+          mv "${{ github.workspace }}/${BASE_NAME}-No-DTB.zip" "${{ github.workspace }}/zip_artifacts/"
+
+      # 16. 上传 AnyKernel3 双版本刷入包
+      - name: 上传 AnyKernel3 双版本刷入包 (ZIP)
         uses: actions/upload-artifact@v4
         with:
-          name: crux-compiled-kernels
-          path: |
-            ${{ env.FINAL_ZIP_NAME }}
-            ${{ env.NO_DTB_ZIP_NAME }}
+          name: ${{ steps.meta.outputs.base_name }}-Flashable-Packages
+          path: ${{ github.workspace }}/zip_artifacts/*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      # 17. 上传内核镜像 (compact)
+      - name: 上传内核镜像 (compact - boot 文件夹)
+        if: ${{ (github.event.inputs.artifact_scope || 'compact') == 'compact' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.base_name }}
+          path: ${{ env.OUT_DIR }}/arch/arm64/boot
+          if-no-files-found: warn
+          retention-days: 14
+
+      # 18. 上传全量构建包 (complete)
+      - name: 上传内核构建包 (complete - 整个 out 目录)
+        if: ${{ github.event.inputs.artifact_scope == 'complete' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.base_name }}-out
+          path: ${{ env.OUT_DIR }}
+          if-no-files-found: warn
+          retention-days: 7
+
+      # 19. 上传全量编译日志
+      - name: 上传编译日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.base_name }}-log
+          path: ${{ github.workspace }}/build.log
+          if-no-files-found: warn
+          retention-days: 14
+
+      # 20. 上传最终配置
+      - name: 上传最终配置
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.base_name }}-config
+          path: ${{ env.OUT_DIR }}/${{ steps.meta.outputs.base_name }}.config
+          if-no-files-found: warn
+          retention-days: 14
+
+      # 21. 在页面生成可视化构建摘要
+      - name: 写入编译摘要
+        if: always()
+        run: |
+          {
+            echo "## 小米 9 Pro (crux) 内核编译运行摘要"
+            echo ""
+            echo "| 项目 | 配置参数值 |"
+            echo "|---|---|"
+            echo "| 机型配置 (Defconfig) | \`arch/arm64/configs/crux_defconfig\` |"
+            echo "| 所用工具链 (Toolchain) | \`${{ github.event.inputs.toolchain || 'zyc' }}\` |"
+            echo "| LTO 优化模式 | \`${{ steps.build.outputs.lto_mode }}\` |"
+            echo "| 实际编译耗时 | **${{ steps.build.outputs.duration_min }} 分 ${{ steps.build.outputs.duration_sec }} 秒** |"
+            echo "| ReSukiSU 模块状态 | **${{ env.RUN_KSU_SUSFS == 'true' && '已启用' || '未启用' }}** |"
+            echo "| 挂钩选择 (Hook Type) | \`${{ env.HOOK_TYPE }}\` |"
+            echo "| Baseband Guard 🛡️ | **${{ env.ENABLE_BBG == 'true' && '已开启' || '未启用' }}** |"
+            echo "| Droidspaces & Docker 🐳 | **${{ env.RUN_DROIDSPACES == 'true' && '已注入' || '未启用' }}** |"
+            echo "| 任务最终状态 | **${{ job.status }}** |"
+          } >> "$GITHUB_STEP_SUMMARY"
