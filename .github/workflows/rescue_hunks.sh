@@ -108,11 +108,11 @@ if [ -f "$CMDLINE_FILE" ]; then
 fi
 
 # ---------------------------------------------------------------------
-# 3. 修复 fs/proc/task_mmu.c (对齐 show_map_vma & show_smap 全部 SusFS 逻辑)
+# 3. 修复 fs/proc/task_mmu.c (融合 show_map_vma 补全 + 误打块清理 + show_smap 精准注入)
 # ---------------------------------------------------------------------
 TASK_MMU_FILE="fs/proc/task_mmu.c"
 if [ -f "$TASK_MMU_FILE" ]; then
-    echo "[+] Repatching $TASK_MMU_FILE (Full AST Injection)..."
+    echo "[+] Repatching $TASK_MMU_FILE (Cleaning dirty hunks & alignment)..."
     awk '
     BEGIN { 
         header_added = 0; 
@@ -121,9 +121,10 @@ if [ -f "$TASK_MMU_FILE" ]; then
         map_vma_post_patched = 0;
         in_show_smap = 0; 
         smap_patched = 0;
+        skip_bad_block = 0;
     }
 
-    /* 1. 头文件包含 */
+    /* 1. 插入 SusFS 头文件 */
     /#include <linux\/ctype\.h>/ && !header_added {
         print $0
         print "#if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)"
@@ -133,7 +134,18 @@ if [ -f "$TASK_MMU_FILE" ]; then
         next
     }
 
-    /* 2. 匹配 show_map_vma */
+    /* 2. 拦截并清除误打在 smap_gather_stats 里的 SUSFS_SUS_MAP 块 */
+    /#ifdef CONFIG_KSU_SUSFS_SUS_MAP/ && !in_show_smap {
+        skip_bad_block = 1
+        next
+    }
+    skip_bad_block && /#endif/ {
+        skip_bad_block = 0
+        next
+    }
+    skip_bad_block { next }
+
+    /* 3. 匹配 show_map_vma */
     /show_map_vma\(struct seq_file \*m, struct vm_area_struct \*vma/ {
         in_show_map_vma = 1
         print $0
@@ -183,13 +195,14 @@ if [ -f "$TASK_MMU_FILE" ]; then
         next
     }
 
-    /* 3. 匹配 show_smap */
+    /* 4. 匹配进入 show_smap 函数体 */
     /static int show_smap\(struct seq_file \*m, void \*v/ {
         in_show_smap = 1
         print $0
         next
     }
 
+    /* 精确在 show_smap 内的 smaps_walk.private 前注入 (返回 0，因 show_smap 为 int 类型) */
     in_show_smap && /smaps_walk\.private =/ && !smap_patched {
         print "#ifdef CONFIG_KSU_SUSFS_SUS_MAP"
         print "\tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))"
