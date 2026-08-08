@@ -585,7 +585,7 @@ jobs:
               "flash_boot;" > "${target_dir}/anykernel.sh"
 
             if [ "$has_dtbo" = "true" ]; then
-              echo 'if [ -f /tmp/anykernel/dtbo.img ]; then flash_dtbo; fi' >> "${target_dir}/anykernel.sh"
+              echo 'if [ -f /tmp/anykernel/dtbo.img ]; then flash_generic dtbo; fi' >> "${target_dir}/anykernel.sh"
             fi
           }
 
