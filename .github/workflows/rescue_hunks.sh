@@ -108,21 +108,22 @@ if [ -f "$CMDLINE_FILE" ]; then
 fi
 
 # ---------------------------------------------------------------------
-# 3. 修复 fs/proc/task_mmu.c (清理误打在 smap_gather_stats 的代码并注入 show_smap)
+# 3. 修复 fs/proc/task_mmu.c (对齐 show_map_vma & show_smap 全部 SusFS 逻辑)
 # ---------------------------------------------------------------------
 TASK_MMU_FILE="fs/proc/task_mmu.c"
 if [ -f "$TASK_MMU_FILE" ]; then
-    echo "[+] Repatching $TASK_MMU_FILE (Fixing misapplied show_smap hunk)..."
-    
+    echo "[+] Repatching $TASK_MMU_FILE (Full AST Injection)..."
     awk '
     BEGIN { 
         header_added = 0; 
+        in_show_map_vma = 0; 
+        map_vma_pre_patched = 0;
+        map_vma_post_patched = 0;
         in_show_smap = 0; 
         smap_patched = 0;
-        skip_bad_block = 0;
     }
 
-    /* 1. 插入 SusFS 头文件 */
+    /* 1. 头文件包含 */
     /#include <linux\/ctype\.h>/ && !header_added {
         print $0
         print "#if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)"
@@ -132,25 +133,63 @@ if [ -f "$TASK_MMU_FILE" ]; then
         next
     }
 
-    /* 2. 拦截并清除之前打错在 smap_gather_stats 里的 SUSFS_SUS_MAP 块 */
-    /#ifdef CONFIG_KSU_SUSFS_SUS_MAP/ && !in_show_smap {
-        skip_bad_block = 1
+    /* 2. 匹配 show_map_vma */
+    /show_map_vma\(struct seq_file \*m, struct vm_area_struct \*vma/ {
+        in_show_map_vma = 1
+        print $0
         next
     }
-    skip_bad_block && /#endif/ {
-        skip_bad_block = 0
-        next
-    }
-    skip_bad_block { next }
 
-    /* 3. 匹配进入 show_smap 函数体 */
+    /* 在 dev = inode->i_sb->s_dev; 前注入 OPEN_REDIRECT 和 SUS_MAP */
+    in_show_map_vma && /dev = inode->i_sb->s_dev;/ && !map_vma_pre_patched {
+        print "#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT"
+        print "\t\tif (SUSFS_IS_INODE_OPEN_REDIRECT(inode)) {"
+        print "\t\t\tchar *spoofed_redirected_name = NULL;"
+        print "\t\t\tint srcu_idx = srcu_read_lock(&susfs_srcu_open_redirect);"
+        print "\t\t\tint ret = susfs_open_redirect_spoof_show_map_vma_srcu(inode, &ino, &dev, &spoofed_redirected_name);"
+        print "\t\t\tif (!ret) {"
+        print "\t\t\t\tpgoff = ((loff_t)vma->vm_pgoff) << PAGE_SHIFT;"
+        print "\t\t\t\tstart = vma->vm_start;"
+        print "\t\t\t\tend = vma->vm_end;"
+        print "\t\t\t\tshow_vma_header_prefix(m, start, end, flags, pgoff, dev, ino);"
+        print "\t\t\t\tseq_pad(m, \047 \047);"
+        print "\t\t\t\tif (spoofed_redirected_name)"
+        print "\t\t\t\t\tseq_puts(m, spoofed_redirected_name);"
+        print "\t\t\t\tseq_putc(m, \047\\n\047);"
+        print "\t\t\t\tsrcu_read_unlock(&susfs_srcu_open_redirect, srcu_idx);"
+        print "\t\t\t\treturn;"
+        print "\t\t\t}"
+        print "\t\t\tsrcu_read_unlock(&susfs_srcu_open_redirect, srcu_idx);"
+        print "\t\t}"
+        print "#endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT"
+        print "#ifdef CONFIG_KSU_SUSFS_SUS_MAP"
+        print "\t\tif (SUSFS_IS_INODE_SUS_MAP(inode))"
+        print "\t\t\treturn;"
+        print "#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP"
+        
+        map_vma_pre_patched = 1
+        print $0
+        next
+    }
+
+    /* 在 pgoff 赋值后注入 SUS_KSTAT */
+    in_show_map_vma && /pgoff = \(\(loff_t\)vma->vm_pgoff\) << PAGE_SHIFT;/ && !map_vma_post_patched {
+        print $0
+        print "#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT"
+        print "\t\tsusfs_sus_kstat_spoof_show_map_vma(inode, &dev, &ino);"
+        print "#endif // #ifdef CONFIG_KSU_SUSFS_SUS_KSTAT"
+        map_vma_post_patched = 1
+        in_show_map_vma = 0
+        next
+    }
+
+    /* 3. 匹配 show_smap */
     /static int show_smap\(struct seq_file \*m, void \*v/ {
         in_show_smap = 1
         print $0
         next
     }
 
-    /* 4. 精确在 show_smap 函数内的 smaps_walk.private 前注入 */
     in_show_smap && /smaps_walk\.private =/ && !smap_patched {
         print "#ifdef CONFIG_KSU_SUSFS_SUS_MAP"
         print "\tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))"
