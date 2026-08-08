@@ -168,7 +168,7 @@ if [ -f "$TASK_MMU_FILE" ]; then
 fi
 
 # ---------------------------------------------------------------------
-# 4. 修复 fs/namei.c (严格仅对齐 do_tmpfile 遗漏的 putname)
+# 4. 修复 fs/namei.c (精确锁定 out: 标号)
 # ---------------------------------------------------------------------
 NAMEI_FILE="fs/namei.c"
 if [ -f "$NAMEI_FILE" ]; then
@@ -176,6 +176,7 @@ if [ -f "$NAMEI_FILE" ]; then
     awk '
     BEGIN { 
         in_do_tmpfile = 0;
+        in_tmpfile_out = 0;
         tmpfile_out_injected = 0;
 
         in_do_o_path = 0; 
@@ -187,25 +188,27 @@ if [ -f "$NAMEI_FILE" ]; then
         path_openat_var_added = 0;
     }
 
-    /* === 1. do_tmpfile：仅补全末尾 path_put(&path) 后的 putname === */
+    /* === 1. do_tmpfile：严格仅在 out: 标号下的 path_put(&path) 之后注入 === */
     /static int do_tmpfile\(struct nameidata \*nd,/ {
         in_do_tmpfile = 1
         print $0
         next
     }
 
-    in_do_tmpfile && /path_put\(&path\);/ && !tmpfile_out_injected {
+    in_do_tmpfile && /out:/ {
+        in_tmpfile_out = 1
+        print $0
+        next
+    }
+
+    in_tmpfile_out && /path_put\(&path\);/ && !tmpfile_out_injected {
         print $0
         print "#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT"
         print "\tif (fake_filename && !IS_ERR(fake_filename))"
         print "\t\tputname(fake_filename);"
         print "#endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT"
         tmpfile_out_injected = 1
-        next
-    }
-
-    in_do_tmpfile && tmpfile_out_injected && /return error;/ {
-        print $0
+        in_tmpfile_out = 0
         in_do_tmpfile = 0
         next
     }
