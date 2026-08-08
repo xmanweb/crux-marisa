@@ -1,13 +1,13 @@
 #!/bin/bash
 # =====================================================================
-# 🚀 SusFS Rescue Engine (Fully Aligned Edition)
+# 🚀 SusFS Rescue Engine (Precise AST-Style Alignment)
 # 场景：GitHub Actions 自动化流水线
-# 特性：严格匹配源码结构，补齐 fs/namei.c 及 fs/namespace.c 的真实逻辑
+# 修复：自动清除 task_mmu.c 中被模糊匹配打错位置的补丁并重新精准注入
 # =====================================================================
 
 set -e
 
-echo "🚀 [SusFS Rescue Engine] Running full-alignment patcher..."
+echo "🚀 [SusFS Rescue Engine] Running AST-Style patch alignment..."
 
 # ---------------------------------------------------------------------
 # 1. 修复 fs/namespace.c (功能对齐 ida_alloc_min API)
@@ -108,21 +108,58 @@ if [ -f "$CMDLINE_FILE" ]; then
 fi
 
 # ---------------------------------------------------------------------
-# 3. 修复 fs/proc/task_mmu.c
+# 3. 修复 fs/proc/task_mmu.c (清理误打在 smap_gather_stats 的代码并注入 show_smap)
 # ---------------------------------------------------------------------
 TASK_MMU_FILE="fs/proc/task_mmu.c"
 if [ -f "$TASK_MMU_FILE" ]; then
-    echo "[+] Patching $TASK_MMU_FILE..."
+    echo "[+] Repatching $TASK_MMU_FILE (Fixing misapplied show_smap hunk)..."
     
     awk '
-    BEGIN { header_added = 0; }
+    BEGIN { 
+        header_added = 0; 
+        in_show_smap = 0; 
+        smap_patched = 0;
+        skip_bad_block = 0;
+    }
 
+    /* 1. 插入 SusFS 头文件 */
     /#include <linux\/ctype\.h>/ && !header_added {
         print $0
         print "#if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)"
         print "#include <linux/susfs_def.h>"
-        print "#endif // #if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)"
+        print "#endif"
         header_added = 1
+        next
+    }
+
+    /* 2. 拦截并清除之前打错在 smap_gather_stats 里的 SUSFS_SUS_MAP 块 */
+    /#ifdef CONFIG_KSU_SUSFS_SUS_MAP/ && !in_show_smap {
+        skip_bad_block = 1
+        next
+    }
+    skip_bad_block && /#endif/ {
+        skip_bad_block = 0
+        next
+    }
+    skip_bad_block { next }
+
+    /* 3. 匹配进入 show_smap 函数体 */
+    /static int show_smap\(struct seq_file \*m, void \*v/ {
+        in_show_smap = 1
+        print $0
+        next
+    }
+
+    /* 4. 精确在 show_smap 函数内的 smaps_walk.private 前注入 */
+    in_show_smap && /smaps_walk\.private =/ && !smap_patched {
+        print "#ifdef CONFIG_KSU_SUSFS_SUS_MAP"
+        print "\tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))"
+        print "\t\treturn 0;"
+        print "#endif"
+        print ""
+        smap_patched = 1
+        in_show_smap = 0
+        print $0
         next
     }
 
@@ -131,16 +168,19 @@ if [ -f "$TASK_MMU_FILE" ]; then
 fi
 
 # ---------------------------------------------------------------------
-# 4. 修复 fs/namei.c (精确匹配 do_o_path 与 path_openat)
+# 4. 修复 fs/namei.c (精准控制 do_o_path 与 path_openat)
 # ---------------------------------------------------------------------
 NAMEI_FILE="fs/namei.c"
 if [ -f "$NAMEI_FILE" ]; then
     echo "[+] Patching $NAMEI_FILE..."
     
     awk '
-    BEGIN { in_do_o_path = 0; in_path_openat = 0; }
+    BEGIN { 
+        in_do_o_path = 0; 
+        do_o_path_body_injected = 0;
+        in_path_openat = 0; 
+    }
 
-    /* 匹配 do_o_path 开头 */
     /static int do_o_path\(struct nameidata \*nd, unsigned flags, struct file \*file\)/ {
         in_do_o_path = 1
         print $0
@@ -175,20 +215,21 @@ if [ -f "$NAMEI_FILE" ]; then
         print "\t\t\t}"
         print "\t\t}"
         print "#endif"
+        do_o_path_body_injected = 1
         next
     }
 
-    in_do_o_path && /return error;/ {
+    in_do_o_path && do_o_path_body_injected && /return error;/ {
         print "#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT"
         print "\tif (fake_filename && !IS_ERR(fake_filename))"
         print "\t\tputname(fake_filename);"
         print "#endif"
         print $0
         in_do_o_path = 0
+        do_o_path_body_injected = 0
         next
     }
 
-    /* 匹配 path_openat 开头注入 */
     /static struct file \*path_openat\(struct nameidata \*nd,/ {
         in_path_openat = 1
         print $0
@@ -248,4 +289,4 @@ if [ -f "$SYS_FILE" ]; then
     ' "$SYS_FILE" > "${SYS_FILE}.tmp" && mv "${SYS_FILE}.tmp" "$SYS_FILE"
 fi
 
-echo "🎉 [SusFS Rescue Engine] Fully aligned and ready for pipeline build!"
+echo "🎉 [SusFS Rescue Engine] Cleaned misapplied hunks & correctly inserted into show_smap!"
