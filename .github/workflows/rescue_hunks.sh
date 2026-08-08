@@ -108,11 +108,11 @@ if [ -f "$CMDLINE_FILE" ]; then
 fi
 
 # ---------------------------------------------------------------------
-# 修复 fs/proc/task_mmu.c (仅清理 smap_gather_stats 脏块，透传 show_map_vma)
+# 修复 fs/proc/task_mmu.c (使用标准 AWK 语法修复注释报错)
 # ---------------------------------------------------------------------
 TASK_MMU_FILE="fs/proc/task_mmu.c"
 if [ -f "$TASK_MMU_FILE" ]; then
-    echo "[+] Safely cleaning smap_gather_stats in $TASK_MMU_FILE..."
+    echo "[+] Repatching $TASK_MMU_FILE safely..."
     awk '
     BEGIN { 
         header_added = 0; 
@@ -123,12 +123,12 @@ if [ -f "$TASK_MMU_FILE" ]; then
         skip_next_blank = 0;
     }
 
-    /* 0. 吞掉清除脏块后紧跟的多余空行 */
+    # 0. 吞掉清除脏块后紧跟的多余空行
     skip_next_blank && NF == 0 { skip_next_blank = 0; next }
     skip_next_blank { skip_next_blank = 0 }
 
-    /* 1. 确保头文件注入（如已存在则不重复添加） */
-    /#include <linux\/ctype\.h>/ && !header_added {
+    # 1. 在第一个 #include 下方注入 SusFS 头文件
+    /^#include / && !header_added {
         print $0
         print "#if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)"
         print "#include <linux/susfs_def.h>"
@@ -137,7 +137,7 @@ if [ -f "$TASK_MMU_FILE" ]; then
         next
     }
 
-    /* 2. 严格限定在 smap_gather_stats 内部清理脏块 */
+    # 2. 严格锁定 smap_gather_stats 内部清理脏块
     /smap_gather_stats\(/ {
         in_smap_gather_stats = 1
         print $0
@@ -150,7 +150,7 @@ if [ -f "$TASK_MMU_FILE" ]; then
     }
     skip_bad_block && /#endif/ {
         skip_bad_block = 0
-        skip_next_blank = 1 /* 吃掉残余空行 */
+        skip_next_blank = 1 # 吃掉残余空行
         next
     }
     skip_bad_block { next }
@@ -161,7 +161,7 @@ if [ -f "$TASK_MMU_FILE" ]; then
         next
     }
 
-    /* 3. 补全 show_smap (如果尚未 patch) */
+    # 3. show_smap 补全逻辑
     /static int show_smap\(struct seq_file \*m, void \*v/ {
         in_show_smap = 1
         print $0
@@ -180,7 +180,13 @@ if [ -f "$TASK_MMU_FILE" ]; then
         next
     }
 
-    /* 其它所有代码（包括已修补正确的 show_map_vma）全部原样打印 */
+    in_show_smap && /^}/ {
+        in_show_smap = 0
+        print $0
+        next
+    }
+
+    # 其余代码原样透传
     { print }
     ' "$TASK_MMU_FILE" > "${TASK_MMU_FILE}.tmp" && mv "${TASK_MMU_FILE}.tmp" "$TASK_MMU_FILE"
 fi
