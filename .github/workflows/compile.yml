@@ -467,8 +467,8 @@ jobs:
           
           # 宏设定构建列表
           CONFIG_ARGS=(
-            -e THREAD_INFO_IN_TASK
-            -e BUILD_ARM64_DT_OVERLAY
+            -e THREAD_INFO_IN_TASK \
+            -e BUILD_ARM64_DT_OVERLAY \
           )
             
           if [ "${{ env.RUN_KSU_SUSFS }}" = "true" ]; then
@@ -494,9 +494,10 @@ jobs:
           fi
           
           if [ "${{ env.RUN_DROIDSPACES }}" = "true" ]; then
-            CONFIG_ARGS+=(
-              -e PSI
-              -d ANDROID_PARANOID_NETWORK
+            CONFIG_ARGS+=(\
+              -e PSI \
+              -d ANDROID_PARANOID_NETWORK \
+              -e USER_NS \
             )              
           fi
           
