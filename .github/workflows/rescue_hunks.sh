@@ -192,123 +192,57 @@ if [ -f "$TASK_MMU_FILE" ]; then
 fi
 
 # ---------------------------------------------------------------------
-# 4. 修复 fs/namei.c (精确锁定 out: 标号)
+# 4. 修复 fs/super.c 
 # ---------------------------------------------------------------------
-NAMEI_FILE="fs/namei.c"
-if [ -f "$NAMEI_FILE" ]; then
-    echo "[+] Patching $NAMEI_FILE..."
-    awk '
-    BEGIN { 
-        in_do_tmpfile = 0;
-        in_tmpfile_out = 0;
-        tmpfile_out_injected = 0;
+TARGET_FILE="./fs/super.c"
 
-        in_do_o_path = 0; 
-        do_o_path_var_added = 0;
-        do_o_path_body_injected = 0;
-        do_o_path_exit_injected = 0;
-
-        in_path_openat = 0; 
-        path_openat_var_added = 0;
-    }
-
-    /* === 1. do_tmpfile：严格仅在 out: 标号下的 path_put(&path) 之后注入 === */
-    /static int do_tmpfile\(struct nameidata \*nd,/ {
-        in_do_tmpfile = 1
-        print $0
-        next
-    }
-
-    in_do_tmpfile && /out:/ {
-        in_tmpfile_out = 1
-        print $0
-        next
-    }
-
-    in_tmpfile_out && /path_put\(&path\);/ && !tmpfile_out_injected {
-        print $0
-        print "#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT"
-        print "\tif (fake_filename && !IS_ERR(fake_filename))"
-        print "\t\tputname(fake_filename);"
-        print "#endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT"
-        tmpfile_out_injected = 1
-        in_tmpfile_out = 0
-        in_do_tmpfile = 0
-        next
-    }
-
-    /* === 2. do_o_path === */
-    /static int do_o_path\(struct nameidata \*nd,/ {
-        in_do_o_path = 1
-        print $0
-        next
-    }
-
-    in_do_o_path && /struct path path;/ && !do_o_path_var_added {
-        print "#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT"
-        print "\tint old_dfd = nd->dfd;"
-        print "\tstruct filename *fake_filename = NULL;"
-        print "#endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT"
-        print $0
-        do_o_path_var_added = 1
-        next
-    }
-
-    in_do_o_path && /if \(!error\) \{/ && !do_o_path_body_injected {
-        print $0
-        print "#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT"
-        print "\t\tif (old_dfd != -1 &&"
-        print "\t\t\tSUSFS_IS_INODE_OPEN_REDIRECT_WITHOUT_UID_CHECK(path.dentry->d_inode))"
-        print "\t\t{"
-        print "\t\t\tfake_filename = susfs_open_redirect_spoof_do_sys_openat(path.dentry->d_inode);"
-        print "\t\t\tif (fake_filename && !IS_ERR(fake_filename)) {"
-        print "\t\t\t\tpath_put(&path);"
-        print "\t\t\t\trestore_nameidata();"
-        print "\t\t\t\tset_nameidata(nd, old_dfd, fake_filename);"
-        print "\t\t\t\terror = path_lookupat(nd, flags, &path);"
-        print "\t\t\t\tif (unlikely(error)) {"
-        print "\t\t\t\t\tputname(fake_filename);"
-        print "\t\t\t\t\treturn error;"
-        print "\t\t\t\t}"
-        print "\t\t\t}"
-        print "\t\t}"
-        print "#endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT"
-        do_o_path_body_injected = 1
-        next
-    }
-
-    in_do_o_path && do_o_path_body_injected && /return error;/ && !do_o_path_exit_injected {
-        print "#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT"
-        print "\tif (fake_filename && !IS_ERR(fake_filename))"
-        print "\t\tputname(fake_filename);"
-        print "#endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT"
-        print $0
-        do_o_path_exit_injected = 1
-        in_do_o_path = 0
-        next
-    }
-
-    /* === 3. path_openat === */
-    /static struct file \*path_openat\(struct nameidata \*nd,/ {
-        in_path_openat = 1
-        print $0
-        next
-    }
-
-    in_path_openat && /const char \*s;/ && !path_openat_var_added {
-        print "#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT"
-        print "\tint old_dfd = nd->dfd;"
-        print "\tstruct filename *fake_filename = NULL;"
-        print "#endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT"
-        print $0
-        path_openat_var_added = 1
-        in_path_openat = 0
-        next
-    }
-
-    { print }
-    ' "$NAMEI_FILE" > "${NAMEI_FILE}.tmp" && mv "${NAMEI_FILE}.tmp" "$NAMEI_FILE"
+if [ ! -f "$TARGET_FILE" ]; then
+    echo "Error: Target file $TARGET_FILE does not exist!"
+    exit 1
 fi
+
+awk '
+BEGIN {
+    state = 0
+}
+
+# 1. 匹配函数开头
+/^int get_anon_bdev\(dev_t \*p\)/ {
+    print $0
+    state = 1
+    next
+}
+
+# 2. 匹配 int dev; 并在其后插入包含完整 SUSFS 逻辑的代码段
+state == 1 && /^[[:space:]]*int dev;/ {
+    print $0
+    print ""
+    print "#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT"
+    print "\tif (static_branch_unlikely(&susfs_is_sdcard_android_data_not_decrypted)) {"
+    print "\t\tif (susfs_is_current_ksu_domain()) {"
+    print "\t\t\tdev = ida_alloc_range(&unnamed_dev_ida, DEFAULT_KSU_MNT_MINOR_DEV,"
+    print "\t\t\t\t\t     (1 << MINORBITS) - 1, GFP_ATOMIC);"
+    print "\t\t\tif (dev == -ENOSPC)"
+    print "\t\t\t\tdev = -EMFILE;"
+    print "\t\t\tif (dev < 0)"
+    print "\t\t\t\treturn dev;"
+    print ""
+    print "\t\t\t*p = MKDEV(0, dev);"
+    print "\t\t\treturn 0;"
+    print "\t\t}"
+    print "\t}"
+    print "#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT"
+    state = 2
+    next
+}
+
+# 其他所有行正常输出
+{
+    print $0
+}
+' "$TARGET_FILE" > "${TARGET_FILE}.tmp" && mv "${TARGET_FILE}.tmp" "$TARGET_FILE"
+
+echo "Successfully patched $TARGET_FILE"
 
 # ---------------------------------------------------------------------
 # 5. 修复 kernel/sys.c
