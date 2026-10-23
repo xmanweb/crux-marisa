@@ -42,12 +42,12 @@ on:
           - compact
           - complete
       enable_ksu_susfs:
-        description: '开启 ReSukiSU 功能模块'
+        description: '开启 BakaSU 功能模块'
         required: true
         type: boolean
         default: true
       hook_type:
-        description: '选择 ReSukiSU 挂钩类型 (二选一)'
+        description: '选择 BakaSU 挂钩类型 (二选一)'
         required: true
         default: 'inline_susfs'
         type: choice
@@ -221,7 +221,7 @@ jobs:
           ccache -z
 
       # =====================================================================
-      # REBUILT INTEGRATION STAGES (ReSukiSU & SUSFS / Manual Hook Branches)
+      # REBUILT INTEGRATION STAGES (BakaSU & SUSFS / Manual Hook Branches)
       # =====================================================================
 
       - name: "集成阶段 1: 打入 SUSFS Baseline 补丁 (仅限 inline_susfs)"
@@ -284,11 +284,11 @@ jobs:
             find . -name "*.orig" -delete
           fi
 
-      - name: "集成阶段 2: 注入 ReSukiSU 基准框架"
+      - name: "集成阶段 2: 注入 BakaSU 基准框架"
         if: env.RUN_KSU_SUSFS == 'true'
         run: |
           cd "$KERNEL_DIR"
-          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s main || curl -LSs "https://raw.githubusercontent.com/xmanweb/ReSukiSU/main/kernel/setup.sh" | bash
+          curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash -s sync-susfs
 
       - name: "集成阶段 3: 应用 JackA1ltman 原生 Non-GKI 核心基础设施 (inline_susfs 分支)"
         if: env.RUN_KSU_SUSFS == 'true' && env.HOOK_TYPE == 'inline_susfs'
@@ -305,8 +305,13 @@ jobs:
             sed -i 's/static const struct file_operations sel_handle_status_ops/const struct file_operations sel_handle_status_ops/g' security/selinux/selinuxfs.c
             sed -i 's/static ssize_t (\*const write_op\[\])(struct file \*, char \*, size_t)/ssize_t (\*const write_op\[\])(struct file \*, char \*, size_t)/g' security/selinux/selinuxfs.c
           fi
+          if [ -f "security/selinux/ss/services.c" ]; then
+            sed -i 's/static void security_dump_masked_av/void security_dump_masked_av/g' security/selinux/ss/services.c
+            sed -i 's/static void context_struct_compute_av/void context_struct_compute_av/g' security/selinux/ss/services.c
+          fi
 
-      - name: "集成阶段 3: 注入 ReSukiSU 系统调用手动挂钩 (manual_hook 分支)"
+
+      - name: "集成阶段 3: 注入 BakaSU 系统调用手动挂钩 (manual_hook 分支)"
         if: env.RUN_KSU_SUSFS == 'true' && env.HOOK_TYPE == 'manual_hook'
         run: |
           cd "$KERNEL_DIR"
@@ -326,6 +331,11 @@ jobs:
             sed -i 's/static const struct file_operations sel_handle_status_ops/const struct file_operations sel_handle_status_ops/g' security/selinux/selinuxfs.c
             sed -i 's/static ssize_t (\*const write_op\[\])(struct file \*, char \*, size_t)/ssize_t (\*const write_op\[\])(struct file \*, char \*, size_t)/g' security/selinux/selinuxfs.c
           fi
+          if [ -f "security/selinux/ss/services.c" ]; then
+            sed -i 's/static void security_dump_masked_av/void security_dump_masked_av/g' security/selinux/ss/services.c
+            sed -i 's/static void context_struct_compute_av/void context_struct_compute_av/g' security/selinux/ss/services.c
+          fi
+
 
       # =====================================================================
       # ADVANCED INTEGRATION STAGES (Baseband Guard, Droidspaces)
@@ -691,7 +701,7 @@ jobs:
             echo "| 所用工具链 (Toolchain) | \`${{ github.event.inputs.toolchain || 'zyc' }}\` |"
             echo "| LTO 优化模式 | \`${{ steps.build.outputs.lto_mode }}\` |"
             echo "| 实际编译耗时 | **${{ steps.build.outputs.duration_min }} 分 ${{ steps.build.outputs.duration_sec }} 秒** |"
-            echo "| ReSukiSU 模块状态 | **${{ env.RUN_KSU_SUSFS == 'true' && '已启用' || '未启用' }}** |"
+            echo "| BakaSU 模块状态 | **${{ env.RUN_KSU_SUSFS == 'true' && '已启用' || '未启用' }}** |"
             echo "| 挂钩选择 (Hook Type) | \`${{ env.HOOK_TYPE }}\` |"
             echo "| Baseband Guard 🛡️ | **${{ env.ENABLE_BBG == 'true' && '已开启' || '未启用' }}** |"
             echo "| Droidspaces & Docker 🐳 | **${{ env.RUN_DROIDSPACES == 'true' && '已注入' || '未启用' }}** |"
