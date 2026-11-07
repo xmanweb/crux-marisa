@@ -125,7 +125,7 @@ jobs:
             bc bison flex libssl-dev libelf-dev libncurses5-dev texinfo \
             libgmp3-dev libmpfr-dev libmpc-dev libcap-dev zlib1g-dev \
             build-essential zip unzip curl git python3 python-is-python3 \
-            ccache llvm lld coccinelle lz4 liblz4-tool libstdc++6 openjdk-11-jdk \
+            ccache llvm lld coccinelle lz4 libstdc++6 openjdk-11-jdk \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
 
       # 5. 工具链配置与缓存控制
