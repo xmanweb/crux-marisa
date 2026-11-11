@@ -288,7 +288,7 @@ jobs:
         if: env.RUN_KSU_SUSFS == 'true'
         run: |
           cd "$KERNEL_DIR"
-          curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash -s sync-susfs
+          curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash -s main
 
       - name: "集成阶段 3: 应用 JackA1ltman 原生 Non-GKI 核心基础设施 (inline_susfs 分支)"
         if: env.RUN_KSU_SUSFS == 'true' && env.HOOK_TYPE == 'inline_susfs'
@@ -418,9 +418,9 @@ jobs:
           TRACK=""
           if [ "${{ env.RUN_KSU_SUSFS }}" = "true" ]; then
             if [ "${{ env.HOOK_TYPE }}" = "inline_susfs" ]; then
-              TRACK="${TRACK}-resuki-susfs"
+              TRACK="${TRACK}-baka-susfs"
             else
-              TRACK="${TRACK}-resuki-manual"
+              TRACK="${TRACK}-baka-manual"
             fi
           fi
           [ "${{ env.ENABLE_BBG }}" = "true" ] && TRACK="${TRACK}-bbg"
